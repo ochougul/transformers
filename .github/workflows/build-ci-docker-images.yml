@@ -28,8 +28,7 @@ jobs:
       -
         name: Set tag
         run: |
-          echo "TAG=huggingface/transformers-${{ matrix.file }}:dev" >> "$GITHUB_ENV"
-          echo "setting it to DEV!"
+          echo "TAG=huggingface/transformers-${{ matrix.file }}" >> "$GITHUB_ENV"
 
       -
         name: Set up Docker Buildx
