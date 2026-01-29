@@ -275,21 +275,20 @@ class DeepseekV32Indexer(nn.Module):
         cache_position: torch.LongTensor | None,
     ) -> torch.LongTensor:
         B, S, _ = hidden_states.shape
-        cos, sin = position_embeddings
 
         # Queries
         q_states = self.q_b_proj(q_resid)  # [B, S, H*D]
         q_states = q_states.view(B, S, self.num_heads, self.head_dim)  # [B, S, H, D]
         q_rot, q_pass = torch.split(q_states, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
-        q_rot = apply_rotary_pos_emb(q_rot, cos, sin)  # [B, S, H, rope_D]
-        q_states = torch.cat([q_rot, q_pass], dim=-1)  # [B, S, H, D]
 
         # Keys
         k = self.k_layernorm(self.k_proj(hidden_states))  # [B, S, D]
         k_rot, k_pass = torch.split(k, [self.qk_rope_head_dim, self.head_dim - self.qk_rope_head_dim], dim=-1)
         # MLA uses single-head rope stream, then expands later; keep [B, 1, S, rope_D] here
         k_rot = k_rot.unsqueeze(1)  # [B, 1, S, rope_D]
-        k_rot = apply_rotary_pos_emb(k_rot, cos, sin)  # [B, 1, S, rope_D]
+        q_rot, k_rot = apply_rotary_emb(q_rot, k_rot, position_embeddings)  # [B, S, H, rope_D], [B, 1, S, rope_D]
+
+        q_states = torch.cat([q_rot, q_pass], dim=-1)  # [B, S, H, D]
         k_states = torch.cat(
             [
                 k_rot.expand(B, self.num_heads, S, -1),  # expand rope
@@ -390,19 +389,12 @@ class DeepseekV32Attention(nn.Module):
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor | None, tuple[torch.Tensor] | None]:
         B, S, _ = hidden_states.shape
-        cos, sin = position_embeddings
 
         # ----- Q path -----
         q_resid = self.q_a_layernorm(self.q_a_proj(hidden_states))  # [B, S, q_lora_rank]
         q_states = self.q_b_proj(q_resid).view(B, S, self.num_heads, self.qk_head_dim)  # [B, S, H, D]
         # Split into pass/rot then apply RoPE on q_rot
         q_pass, q_rot = torch.split(q_states, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        q_rot = apply_rotary_pos_emb(q_rot, cos, sin)  # [B, S, H, rope_D]
-        q_states = torch.cat([q_pass, q_rot], dim=-1)  # [B, S, H, D]
-
-        # Layout for matmul: [B, H, S, D]
-        q_states = q_states.transpose(1, 2).contiguous()  # [B, H, S, D]
-
         # ----- KV path (compressed + rope stream) -----
         kv_all = self.kv_a_proj_with_mqa(hidden_states)  # [B, S, kv_rank + rope_D]
         kv_compressed, k_rot = torch.split(kv_all, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -416,7 +408,12 @@ class DeepseekV32Attention(nn.Module):
 
         # Rope on K side: keep a single-head rope stream like MLA, then expand
         k_rot = k_rot.view(B, 1, S, self.qk_rope_head_dim)  # [B, 1, S, rope_D]
-        k_rot = apply_rotary_pos_emb(k_rot, cos, sin)  # [B, 1, S, rope_D]
+        q_rot, k_rot = apply_rotary_emb(q_rot, k_rot, position_embeddings)  # [B, S, H, rope_D], [B, 1, S, rope_D]
+        q_states = torch.cat([q_pass, q_rot], dim=-1)  # [B, S, H, D]
+
+        # Layout for matmul: [B, H, S, D]
+        q_states = q_states.transpose(1, 2).contiguous()  # [B, H, S, D]
+
 
         # Concatenate K = [K_pass, K_rot(expanded)]
         k_states = torch.cat(

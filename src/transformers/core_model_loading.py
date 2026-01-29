@@ -702,7 +702,7 @@ class WeightRenaming(WeightTransform):
 
         if hf_quantizer is not None and self.quantization_operation is not None:
             with log_conversion_errors(
-                layer_name, conversion_errors, (len(collected_tensors), layer_name), self.quantization_operation
+                "quantizing " + "|".join(collected_tensors.keys()), conversion_errors, (len(collected_tensors), layer_name), self.quantization_operation
             ):
                 collected_tensors = self.quantization_operation.convert(
                     collected_tensors,
@@ -752,7 +752,7 @@ class WeightConverter(WeightTransform):
         collected_tensors = self.materialize_tensors()
 
         for op in self.operations:
-            with log_conversion_errors(layer_name, conversion_errors, (len(collected_tensors), layer_name), op):
+            with log_conversion_errors("|".join(collected_tensors.keys()), conversion_errors, (len(collected_tensors), layer_name), op):
                 collected_tensors = op.convert(
                     collected_tensors,
                     source_patterns=self.source_patterns,
@@ -780,7 +780,7 @@ class WeightConverter(WeightTransform):
 
         if hf_quantizer is not None and self.quantization_operation is not None:
             with log_conversion_errors(
-                layer_name, conversion_errors, (len(collected_tensors), layer_name), self.quantization_operation
+                "quantizing " + layer_name, conversion_errors, (len(collected_tensors), layer_name), self.quantization_operation
             ):
                 collected_tensors = self.quantization_operation.convert(
                     collected_tensors,
