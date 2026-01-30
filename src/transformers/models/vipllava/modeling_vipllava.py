@@ -170,9 +170,10 @@ class VipLlavaModel(VipLlavaPreTrainedModel):
         vision_feature_layers = (
             vision_feature_layers if vision_feature_layers is not None else self.config.vision_feature_layers
         )
+        # We need hidden states to select intermediate vision features by layer index below.
+        kwargs["output_hidden_states"] = True
         image_outputs = self.vision_tower(
             pixel_values,
-            output_hidden_states=True,  # Ignore arg on purpose
             return_dict=True,
             **kwargs,
         )
