@@ -637,13 +637,15 @@ class AutoTokenizer:
 
         # if there is a config, we can check that the tokenizer class != than model class and can thus assume we need to use TokenizersBackend
         # Skip this early exit if auto_map is present (custom tokenizer with trust_remote_code)
+        # Note: TOKENIZER_MAPPING_NAMES values can be None if is_tokenizers_available() was False at import time
+        expected_tokenizer_class = TOKENIZER_MAPPING_NAMES.get(config_model_type, "") or ""
         if (
             tokenizer_auto_map is None
             and tokenizer_config_class is not None
             and config_model_type is not None
             and config_model_type != ""
-            and TOKENIZER_MAPPING_NAMES.get(config_model_type, "").replace("Fast", "")
-            != tokenizer_config_class.replace("Fast", "")
+            and expected_tokenizer_class != ""  # Skip this check if we don't have an expected class
+            and expected_tokenizer_class.replace("Fast", "") != tokenizer_config_class.replace("Fast", "")
         ):
             # new model, but we ignore it unless the model type is the same
             try:
