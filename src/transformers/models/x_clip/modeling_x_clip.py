@@ -472,11 +472,7 @@ class XCLIPPreTrainedModel(PreTrainedModel):
             OutputRecorder(XCLIPEncoderLayer, layer_name="text_model"),
             XCLIPVisionEncoderLayer,
         ],
-        "attentions": [
-            OutputRecorder(XCLIPEncoderLayer, layer_name="text_model", index=1),
-            OutputRecorder(XCLIPVisionEncoderLayer, index=1),
-            OutputRecorder(XCLIPEncoderLayer, layer_name="__never__", index=1), # hack to try and pass this layer
-        ],
+        "attentions": OutputRecorder(GradientCheckpointingLayer, layer_name="model", index=1),
     }
 
     @torch.no_grad()
