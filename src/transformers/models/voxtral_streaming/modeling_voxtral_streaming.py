@@ -25,6 +25,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
+from ... import initialization as init
 from ...activations import ACT2FN
 from ...cache_utils import Cache
 from ...generation import GenerationMixin
@@ -378,6 +379,17 @@ class VoxtralStreamingPreTrainedModel(PreTrainedModel):
     _supports_attention_backend = True
     _can_compile_fullgraph = True
 
+    @torch.no_grad()
+    def _init_weights(self, module):
+        super()._init_weights(module)
+        if isinstance(module, TimeEmbedding):
+            inv_freq = torch.exp(
+                -math.log(module.theta)
+                * torch.arange(module.dim // 2).float()
+                / (module.dim // 2)
+            )
+            init.copy_(module.inv_freq, inv_freq)
+
 
 @auto_docstring(
     custom_intro="""
@@ -706,8 +718,9 @@ class VoxtralStreamingForConditionalGeneration(VoxtralStreamingPreTrainedModel, 
             )
             inputs_embeds += audio_outputs.pooler_output
 
-        time_tensor = torch.tensor(
-            [6],
+        time_tensor = torch.full(
+            (1,),
+            fill_value=6,
             device=inputs_embeds.device,
             dtype=inputs_embeds.dtype,
         )
