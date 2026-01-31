@@ -204,6 +204,20 @@ class MistralRMSNorm(nn.Module):
         return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
+class MistralStreamingAdaRmsNorm(nn.Module):
+    def __init__(self, config: MistralConfig):
+        super().__init__()
+        # TODO: how to add the intermediate size to the config? since it already the mistral one? new model? new config only?
+        self.linear1 = nn.Linear(config.hidden_size, 32, bias=False)
+        self.linear2 = nn.Linear(32, config.hidden_size, bias=False)
+
+    def forward(self, hidden_states):
+        hidden_states = self.linear1(hidden_states)
+        hidden_states = nn.functional.gelu(hidden_states)
+        hidden_states = self.linear2(hidden_states)
+        return hidden_states
+
+
 class MistralDecoderLayer(GradientCheckpointingLayer):
     def __init__(self, config: MistralConfig, layer_idx: int):
         super().__init__()
@@ -212,6 +226,9 @@ class MistralDecoderLayer(GradientCheckpointingLayer):
         self.mlp = MistralMLP(config)
         self.input_layernorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        if config.use_ada_rms_norm:
+            self.ada_rms_norm = MistralStreamingAdaRmsNorm(config)
 
     def forward(
         self,
@@ -222,6 +239,7 @@ class MistralDecoderLayer(GradientCheckpointingLayer):
         use_cache: bool | None = False,
         cache_position: torch.LongTensor | None = None,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        t_cond: torch.Tensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> torch.Tensor:
         residual = hidden_states
@@ -242,6 +260,10 @@ class MistralDecoderLayer(GradientCheckpointingLayer):
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
+
+        if self.ada_rms_norm is not None:
+            hidden_states = hidden_states * (1 + self.ada_rms_norm(t_cond))
+
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states
