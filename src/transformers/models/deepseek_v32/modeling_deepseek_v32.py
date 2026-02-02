@@ -233,12 +233,13 @@ def apply_rotary_emb(
     freqs_cis: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     shape = x.shape
+    dtype = x.dtype
     x = x.view(*shape[:-1], 2, -1).transpose(-1, -2).contiguous()
     x = torch.view_as_complex(x.float().view(*shape[:-1], -1, 2))
     freqs_cis = freqs_cis.view(1, x.size(1), 1, x.size(-1))
     y = torch.view_as_real(x * freqs_cis).flatten(3)
     y = torch.cat([y[..., 0::2], y[..., 1::2]], dim=-1)
-    return y
+    return y.to(dtype)
 
 def apply_interleave_rotary_emb(
     x: torch.Tensor,
@@ -251,9 +252,10 @@ def apply_interleave_rotary_emb(
     return y
 
 def index_no_scaling(q: torch.Tensor, _scale, k: torch.Tensor) -> torch.Tensor:
-    logits = torch.matmul(q, k.transpose(-1, -2))  # [B, H, M, N]
+    # Non quantized version goes extremely wrong :)
+    logits = q @ k[..., None]
     logits = torch.relu(logits)
-    logits = logits * _scale.unsqueeze(-1)
+    logits = logits.squeeze(-1) * _scale
     index_score = logits.sum(dim=-1)               # [B, H, M]
     return index_score
 
@@ -308,8 +310,11 @@ class DeepseekV32Indexer(nn.Module):
         k = torch.cat([k_pe, k_nope], dim=-1)
 
         if past_key_values is not None:
-            past_key_values.indexer_keys = torch.cat([getattr(past_key_values, "indexer_keys", torch.empty_like(k)), k], dim=1)
-            k = past_key_values.indexer_keys
+            if not hasattr(past_key_values, "indexer_keys"):
+                past_key_values.indexer_keys = k
+            else:
+                past_key_values.indexer_keys = torch.cat([past_key_values.indexer_keys, k], dim=1)
+                k = past_key_values.indexer_keys
 
         # weights_proj is kept in fp32
         weights = self.weights_proj(hidden_states.float()) * self.num_heads ** -0.5
