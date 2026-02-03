@@ -2272,13 +2272,13 @@ class VersionComparison(Enum):
     @staticmethod
     def from_string(version_string: str) -> "VersionComparison":
         string_to_operator = {
-            "=": VersionComparison.EQUAL.value,
-            "==": VersionComparison.EQUAL.value,
-            "!=": VersionComparison.NOT_EQUAL.value,
-            ">": VersionComparison.GREATER_THAN.value,
-            "<": VersionComparison.LESS_THAN.value,
-            ">=": VersionComparison.GREATER_THAN_OR_EQUAL.value,
-            "<=": VersionComparison.LESS_THAN_OR_EQUAL.value,
+            "=": VersionComparison.EQUAL,
+            "==": VersionComparison.EQUAL,
+            "!=": VersionComparison.NOT_EQUAL,
+            ">": VersionComparison.GREATER_THAN,
+            "<": VersionComparison.LESS_THAN,
+            ">=": VersionComparison.GREATER_THAN_OR_EQUAL,
+            "<=": VersionComparison.LESS_THAN_OR_EQUAL,
         }
 
         return string_to_operator[version_string]
@@ -2311,7 +2311,7 @@ class Backend:
         return current_version
 
     def is_satisfied(self) -> bool:
-        return VersionComparison.from_string(self.version_comparison)(
+        return VersionComparison.from_string(self.version_comparison).value(
             version.parse(self.get_installed_version()), version.parse(self.version)
         )
 
