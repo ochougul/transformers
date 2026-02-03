@@ -423,7 +423,7 @@ class DeepseekV32Attention(nn.Module):
                 kv_compressed, k_rot.squeeze(2), layer_idx=self.layer_idx, cache_kwargs={"cache_position": cache_position}
             )
 
-        if attention_mask is not None or cache_position[0] == torch.tensor([0], device=cache_position.device):
+        if cache_position[0] == torch.tensor([0], device=cache_position.device):
             q_states = torch.cat([q_pass, q_rot], dim=-1)  # [B, S, H, D]
             kv = self.kv_b_proj(kv_compressed)
             kv = kv.view(B, S, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
@@ -436,7 +436,7 @@ class DeepseekV32Attention(nn.Module):
             index_mask = torch.full((B, S, S), float("-inf"), device=hidden_states.device).scatter_(-1, topk_indices, 0)
             # TODO for now we use `eager` attn implementation only because otherwise the mask is not materialized properly (expectedly so)
             # here we should probably use the masking utils?
-            index_mask += attention_mask[:, 0, :, :]
+            # index_mask += attention_mask[:, 0, :, :] # just for now
             scores += index_mask.unsqueeze(2)
 
             scores = scores.softmax(dim=-1).to(v.dtype)
@@ -450,7 +450,7 @@ class DeepseekV32Attention(nn.Module):
 
             # indexer
             topk_indices = self.indexer(hidden_states, q_resid, cache_position,  position_embeddings, attention_mask,  past_key_values)
-            index_mask = torch.full((B, 1, cache_positions[-1]), float("-inf"), device=hidden_states.device).scatter_(-1, topk_indices, 0)
+            index_mask = torch.full((B, 1, cache_position[-1]), float("-inf"), device=hidden_states.device).scatter_(-1, topk_indices, 0)
             scores += index_mask.unsqueeze(2)
 
             scores = scores.softmax(dim=-1)
