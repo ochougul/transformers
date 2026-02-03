@@ -625,7 +625,7 @@ class FP8Expert(nn.Module):
         from ..activations import ACT2FN
 
         self.block_size = block_size
-        self.num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else config.num_experts
+        self.num_experts = config.num_local_experts if hasattr(config, "num_local_experts") else config.num_experts // 8
         self.hidden_dim = config.hidden_size
         self.intermediate_dim = (
             config.moe_intermediate_size if hasattr(config, "moe_intermediate_size") else config.intermediate_size
@@ -678,7 +678,7 @@ class FP8Expert(nn.Module):
 
         for expert_idx in expert_hit:
             expert_idx = expert_idx[0]
-            if expert_idx == self.num_experts // 4: # i have 3 processes for now
+            if expert_idx == self.num_experts // 8: # i have 3 processes for now
                 continue
             top_k_pos, token_idx = torch.where(expert_mask[expert_idx])
             current_state = hidden_states[token_idx]

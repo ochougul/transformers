@@ -1010,7 +1010,7 @@ class GroupedGemmParallel(TensorParallelLayer):
         # special case we don't "shard" just send this entire tensor to the correct rank.
         if start <= tensor_idx < end:
             # this tensor does need to be materialized on this device:
-            return param[:].to(device=device, dtype=dtype)
+            return param[:].to(device=device)
         else:
             return []
 

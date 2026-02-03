@@ -121,11 +121,10 @@ class DeepseekV32Config(PreTrainedConfig, RotaryEmbeddingConfigMixin):
     keys_to_ignore_at_inference = ["past_key_values"]
 
     base_model_tp_plan = {
-        # "layers.*.self_attn.q_proj": "local_colwise",
-        # "layers.*.self_attn.q_b_proj": "local_colwise",
-        # "layers.*.self_attn.kv_b_proj": "local_colwise",
-        # "layers.*.self_attn.o_proj": "local_rowwise",
-        # "layers.*.self_attn": "gather",
+        # "layers.*.self_attn.q_proj": "colwise",
+        # "layers.*.self_attn.q_b_proj": "colwise",
+        # "layers.*.self_attn.kv_b_proj": "colwise",
+        # "layers.*.self_attn.o_proj": "rowwise",
         "layers.*.mlp.experts.gate_up_proj": "grouped_gemm",
         "layers.*.mlp.experts.down_proj": "grouped_gemm",
         "layers.*.mlp.experts": "gather",
@@ -229,6 +228,7 @@ class DeepseekV32Config(PreTrainedConfig, RotaryEmbeddingConfigMixin):
         self.index_top_k = index_topk
         self.max_seq_len = 16384
         self.intermediate_dim = intermediate_size
+        self.num_hidden_layers = 40
 
 
 
