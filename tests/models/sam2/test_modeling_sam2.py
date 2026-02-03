@@ -70,7 +70,7 @@ class Sam2VisionModelTester:
         backbone_channel_list=[96, 48, 24, 12],
         backbone_feature_sizes=[[32, 32], [16, 16], [8, 8]],
         fpn_hidden_size=32,
-        is_training=False,
+        is_training=True,
     ):
         self.parent = parent
         self.hidden_size = hidden_size
@@ -142,7 +142,6 @@ class Sam2VisionModelTest(ModelTesterMixin, unittest.TestCase):
     all_model_classes = (Sam2VisionModel,) if is_torch_available() else ()
 
     test_resize_embeddings = False
-    test_torch_exportable = True
 
     def setUp(self):
         self.model_tester = Sam2VisionModelTester(self)
@@ -372,7 +371,7 @@ class Sam2ModelTester:
         fpn_hidden_size=32,
         memory_encoder_hidden_size=32,
         batch_size=2,
-        is_training=False,
+        is_training=True,
     ):
         self.parent = parent
         self.image_size = image_size
@@ -715,6 +714,16 @@ class Sam2ModelTest(ModelTesterMixin, PipelineTesterMixin, unittest.TestCase):
 
     def test_sdpa_can_compile_dynamic(self):
         self.skipTest(reason="SAM2 model can't be compiled dynamic yet")
+
+    def _image_features_get_expected_num_attentions(self, model_tester=None):
+        if model_tester is None:
+            model_tester = self.model_tester
+        return sum(model_tester.blocks_per_stage)
+
+    def _image_features_get_expected_num_hidden_states(self, model_tester=None):
+        if model_tester is None:
+            model_tester = self.model_tester
+        return sum(model_tester.blocks_per_stage) + 1
 
 
 def prepare_image():

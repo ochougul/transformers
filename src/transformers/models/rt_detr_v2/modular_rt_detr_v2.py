@@ -14,12 +14,18 @@
 import warnings
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor, nn
+from torch import Tensor
 
 from ... import initialization as init
 from ...configuration_utils import PreTrainedConfig
-from ...utils import is_torchdynamo_compiling, logging
+from ...processing_utils import Unpack
+from ...utils import (
+    TransformersKwargs,
+    logging,
+    torch_compilable_check,
+)
 from ...utils.backbone_utils import (
     verify_backbone_config_arguments,
 )
@@ -507,7 +513,7 @@ class RTDetrV2MultiscaleDeformableAttention(nn.Module):
         spatial_shapes=None,
         spatial_shapes_list=None,
         level_start_index=None,
-        output_attentions: bool = False,
+        **kwargs: Unpack[TransformersKwargs],
     ):
         # Process inputs up to sampling locations calculation using parent class logic
         if position_embeddings is not None:
@@ -515,10 +521,10 @@ class RTDetrV2MultiscaleDeformableAttention(nn.Module):
 
         batch_size, num_queries, _ = hidden_states.shape
         batch_size, sequence_length, _ = encoder_hidden_states.shape
-        if not is_torchdynamo_compiling() and (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() != sequence_length:
-            raise ValueError(
-                "Make sure to align the spatial shapes with the sequence length of the encoder hidden states"
-            )
+        torch_compilable_check(
+            (spatial_shapes[:, 0] * spatial_shapes[:, 1]).sum() == sequence_length,
+            "Make sure to align the spatial shapes with the sequence length of the encoder hidden states",
+        )
 
         value = self.value_proj(encoder_hidden_states)
         if attention_mask is not None:
@@ -595,8 +601,8 @@ class RTDetrV2ForObjectDetection(RTDetrForObjectDetection, RTDetrV2PreTrainedMod
     _tied_weights_keys = {
         r"bbox_embed.(?![0])\d+": r"bbox_embed.0",
         r"class_embed.(?![0])\d+": r"^class_embed.0",
-        "model.decoder.class_embed": "class_embed",
-        "model.decoder.bbox_embed": "bbox_embed",
+        "class_embed": "model.decoder.class_embed",
+        "bbox_embed": "model.decoder.bbox_embed",
     }
 
     def __init__(self, config: RTDetrV2Config):
@@ -608,7 +614,7 @@ class RTDetrV2ForObjectDetection(RTDetrForObjectDetection, RTDetrV2PreTrainedMod
         )
         self.bbox_embed = nn.ModuleList(
             [
-                RTDetrV2MLPPredictionHead(config, config.d_model, config.d_model, 4, num_layers=3)
+                RTDetrV2MLPPredictionHead(config.d_model, config.d_model, 4, num_layers=3)
                 for _ in range(config.decoder_layers)
             ]
         )
