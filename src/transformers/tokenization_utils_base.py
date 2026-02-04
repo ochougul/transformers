@@ -1432,7 +1432,7 @@ class PreTrainedTokenizerBase(PushToHubMixin):
         Returns:
             `dict[str, int]`: The vocabulary.
         """
-        raise NotImplementedError()
+        raise NotImplementedError("We got here!")
 
     def convert_tokens_to_ids(self, tokens: str | list[str]) -> int | list[int]:
         """
