@@ -738,7 +738,6 @@ class Florence2Model(Florence2PreTrainedModel):
         use_cache: bool | None = None,
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         **kwargs,
     ) -> tuple | Florence2Seq2SeqModelOutput:
@@ -746,7 +745,6 @@ class Florence2Model(Florence2PreTrainedModel):
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if encoder_outputs is None:
             if (input_ids is None) ^ (inputs_embeds is not None):
@@ -874,7 +872,6 @@ class Florence2ForConditionalGeneration(Florence2PreTrainedModel, GenerationMixi
         use_cache: bool | None = None,
         output_attentions: bool | None = None,
         output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[TransformersKwargs],
@@ -912,7 +909,6 @@ class Florence2ForConditionalGeneration(Florence2PreTrainedModel, GenerationMixi
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if labels is not None:
             if use_cache:

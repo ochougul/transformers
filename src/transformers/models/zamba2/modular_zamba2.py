@@ -25,7 +25,8 @@ from ...modeling_flash_attention_utils import FlashAttentionKwargs
 from ...modeling_outputs import BaseModelOutputWithPast
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
-from ...utils import is_torchdynamo_compiling, logging
+from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, is_torchdynamo_compiling, logging
+from ...utils.generic import check_model_inputs
 from ...utils.import_utils import (
     is_causal_conv1d_available,
     is_mamba_ssm_available,
@@ -814,6 +815,15 @@ class Zamba2MambaDecoderLayer(ZambaMambaDecoderLayer):
         self.input_layernorm = Zamba2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
 
+class Zamba2InnerMambaDecoderLayer(ZambaMambaDecoderLayer):
+    """Inner mamba layer used within hybrid layers - not captured for output recording."""
+
+    def __init__(self, config: Zamba2Config, layer_idx: int):
+        super().__init__(config, layer_idx)
+        self.mamba = Zamba2MambaMixer(config=config, layer_idx=layer_idx)
+        self.input_layernorm = Zamba2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+
 class Zamba2HybridLayer(ZambaHybridLayer):
     def __init__(
         self, shared_transformer: Zamba2AttentionDecoderLayer, linear: nn.Linear, mamba: Zamba2MambaDecoderLayer
@@ -889,6 +899,7 @@ class Zamba2HybridLayer(ZambaHybridLayer):
         return layer_outputs
 
 
+@auto_docstring
 class Zamba2PreTrainedModel(PreTrainedModel):
     config: Zamba2Config
     base_model_prefix = "model"
@@ -898,8 +909,11 @@ class Zamba2PreTrainedModel(PreTrainedModel):
     _supports_flash_attn = True
     _supports_flex_attn = True
     _supports_sdpa = True
-    # Note: only supports Zamba2HybridDynamicCache
     _is_stateful = True
+    _can_record_outputs = {
+        "hidden_states": [Zamba2MambaDecoderLayer, Zamba2HybridLayer],
+        "attentions": Zamba2Attention,
+    }
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -957,7 +971,10 @@ class Zamba2Model(ZambaModel, Zamba2PreTrainedModel):
         unique_hybrid_blocks = []
 
         for layer_id, layer_type in enumerate(self.layers_block_type):
-            mamba_layer = Zamba2MambaDecoderLayer(self.config, layer_idx=layer_id)
+            if layer_type == "hybrid":
+                mamba_layer = Zamba2InnerMambaDecoderLayer(self.config, layer_idx=layer_id)
+            else:
+                mamba_layer = Zamba2MambaDecoderLayer(self.config, layer_idx=layer_id)
 
             if layer_type == "hybrid":
                 prefix_pattern = f"layers.{layer_id}.shared_transformer"
@@ -985,6 +1002,8 @@ class Zamba2Model(ZambaModel, Zamba2PreTrainedModel):
                 layers.append(mamba_layer)
         return nn.ModuleList(layers)
 
+    @check_model_inputs
+    @auto_docstring
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -993,19 +1012,11 @@ class Zamba2Model(ZambaModel, Zamba2PreTrainedModel):
         past_key_values: Zamba2HybridDynamicCache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
         cache_position: torch.LongTensor | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | BaseModelOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_attentions = kwargs.get("output_attentions", self.config.output_attentions)
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
@@ -1045,13 +1056,7 @@ class Zamba2Model(ZambaModel, Zamba2PreTrainedModel):
         causal_mask = self._update_causal_mask(attention_mask, inputs_embeds, cache_position)
         position_embeddings = self.rotary_emb(hidden_states, position_ids=position_ids)
 
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-
         for layer_idx, layer in enumerate(self.layers):
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-
             layer_outputs = layer(
                 hidden_states,
                 original_hidden_states,
@@ -1067,35 +1072,29 @@ class Zamba2Model(ZambaModel, Zamba2PreTrainedModel):
 
             hidden_states = layer_outputs[0]
 
-            if output_attentions:
-                if layer_outputs[1] is not None:
-                    # append attentions only of attention layers. Mamba layers return `None` as the attention weights
-                    all_self_attns += (layer_outputs[1],)
-
         hidden_states = self.final_layernorm(hidden_states)
-
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
 
         if past_key_values is not None and not past_key_values.has_previous_state:
             past_key_values.has_previous_state = True
 
-        output = BaseModelOutputWithPast(
+        return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values if use_cache else None,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
         )
-        return output if return_dict else output.to_tuple()
 
 
 class Zamba2ForCausalLM(ZambaForCausalLM):
-    pass
+    def __init__(self, config: Zamba2Config):
+        super().__init__(config)
+        self.model = Zamba2Model(config)
+        self.post_init()
 
 
 class Zamba2ForSequenceClassification(ZambaForSequenceClassification):
-    pass
+    def __init__(self, config: Zamba2Config):
+        super().__init__(config)
+        self.model = Zamba2Model(config)
+        self.post_init()
 
 
 __all__ = [

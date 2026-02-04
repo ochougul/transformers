@@ -21,7 +21,8 @@ from ...configuration_utils import PreTrainedConfig
 from ...modeling_outputs import BaseModelOutputWithPooling
 from ...modeling_utils import PreTrainedModel
 from ...processing_utils import Unpack
-from ...utils import auto_docstring, can_return_tuple, logging
+from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
+from ...utils.generic import check_model_inputs
 from ..auto import CONFIG_MAPPING, AutoConfig
 from ..llava.modeling_llava import (
     LlavaCausalLMOutputWithPast,
@@ -288,6 +289,11 @@ class GotOcr2PreTrainedModel(LlavaPreTrainedModel):
     _supports_sdpa = False
     _supports_flex_attn = False
 
+    _can_record_outputs = {
+        "hidden_states": "Qwen2DecoderLayer",
+        "attentions": "Qwen2Attention",
+    }
+
     @torch.no_grad()
     def _init_weights(self, module):
         PreTrainedModel._init_weights(self, module)
@@ -320,6 +326,9 @@ class GotOcr2Model(LlavaModel):
 
         return image_outputs
 
+    @check_model_inputs(tie_last_hidden_states=False)
+    @can_return_tuple
+    @auto_docstring
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -329,18 +338,9 @@ class GotOcr2Model(LlavaModel):
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | GotOcr2ModelOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
@@ -363,8 +363,6 @@ class GotOcr2Model(LlavaModel):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
             return_dict=True,
             cache_position=cache_position,
             **kwargs,
@@ -392,9 +390,6 @@ class GotOcr2ForConditionalGeneration(LlavaForConditionalGeneration):
         inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[TransformersKwargs],
@@ -435,12 +430,6 @@ class GotOcr2ForConditionalGeneration(LlavaForConditionalGeneration):
         "You should keep in mind what features from the module should be used, especially
         when you're planning to sell a template."
         ```"""
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         outputs = self.model(
             input_ids=input_ids,
             pixel_values=pixel_values,
@@ -449,8 +438,6 @@ class GotOcr2ForConditionalGeneration(LlavaForConditionalGeneration):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
             return_dict=True,
             cache_position=cache_position,
             logits_to_keep=logits_to_keep,

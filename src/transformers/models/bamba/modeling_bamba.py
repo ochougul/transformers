@@ -42,7 +42,7 @@ from ...modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, is_torchdynamo_compiling, logging
-from ...utils.generic import is_flash_attention_requested, maybe_autocast
+from ...utils.generic import check_model_inputs, is_flash_attention_requested, maybe_autocast
 from .configuration_bamba import BambaConfig
 
 
@@ -1038,39 +1038,15 @@ class BambaDecoderLayer(GradientCheckpointingLayer):
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
         past_key_values: HybridMambaAttentionDynamicCache | None = None,
-        output_attentions: bool | None = False,
         use_cache: bool | None = False,
         cache_position: torch.LongTensor | None = None,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs: Unpack[BambaFlashAttentionKwargs],
     ) -> tuple[torch.FloatTensor, tuple[torch.FloatTensor, torch.FloatTensor] | None]:
-        """
-        Args:
-            hidden_states (`torch.FloatTensor`): input to the layer of shape `(batch, seq_len, embed_dim)`
-            attention_mask (`torch.FloatTensor`, *optional*): attention mask of size
-                `(batch, sequence_length)` where padding elements are indicated by 0.
-            past_key_values (`HybridMambaAttentionDynamicCache`, *optional*): cached past key and value projection states
-            output_attentions (`bool`, *optional*):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more detail.
-            use_cache (`bool`, *optional*):
-                If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding
-                (see `past_key_values`).
-            cache_position (`torch.LongTensor` of shape `(sequence_length)`, *optional*):
-                Indices depicting the position of the input sequence tokens in the sequence.
-            position_embeddings (`tuple[torch.FloatTensor, torch.FloatTensor]`, *optional*):
-                Tuple containing the cosine and sine positional embeddings of shape `(batch_size, seq_len, head_dim)`,
-                with `head_dim` being the embedding dimension of each attention head.
-            kwargs (`dict`, *optional*):
-                Arbitrary kwargs. Can be used to provide `BambaFlashAttentionKwargs` for
-                padding-free training and/or improve torch.compile performance.
-        """
-
         residual = hidden_states
 
         hidden_states = self.input_layernorm(hidden_states)
 
-        # this is a hybrid decoder layer
         if self.layer_type == "mamba":
             hidden_states = self.mamba(
                 hidden_states=hidden_states,
@@ -1086,28 +1062,20 @@ class BambaDecoderLayer(GradientCheckpointingLayer):
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
-                output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
 
-        # residual connection after attention
         hidden_states = residual + hidden_states
 
-        # feed-forward
         residual = hidden_states
         hidden_states = self.pre_ff_layernorm(hidden_states)
         hidden_states = self.feed_forward(hidden_states)
         hidden_states = residual + hidden_states
 
-        outputs = (hidden_states,)
-
-        if output_attentions:
-            outputs += (self_attn_weights,)
-
-        return outputs
+        return hidden_states, self_attn_weights
 
 
 @auto_docstring
@@ -1119,8 +1087,11 @@ class BambaPreTrainedModel(PreTrainedModel):
     _skip_keys_device_placement = "past_key_values"
     _supports_flash_attn = True
     _supports_sdpa = True
-    # Note: only supports HybridMambaAttentionDynamicCache
     _is_stateful = True
+    _can_record_outputs = {
+        "hidden_states": BambaDecoderLayer,
+        "attentions": BambaAttention,
+    }
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -1152,6 +1123,7 @@ class BambaModel(BambaPreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    @check_model_inputs
     @can_return_tuple
     @auto_docstring
     def forward(
@@ -1162,15 +1134,9 @@ class BambaModel(BambaPreTrainedModel):
         past_key_values: HybridMambaAttentionDynamicCache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[BambaFlashAttentionKwargs],
     ) -> BaseModelOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -1198,45 +1164,26 @@ class BambaModel(BambaPreTrainedModel):
             position_ids = cache_position.unsqueeze(0)
 
         causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+            attention_mask, inputs_embeds, cache_position, past_key_values, kwargs.get("output_attentions", False)
         )
         mamba_mask = self._update_mamba_mask(attention_mask, cache_position)
         position_embeddings = self.rotary_emb(hidden_states, position_ids=position_ids)
 
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attns = () if output_attentions else None
-
         for decoder_layer in self.layers:
-            # Depending on the layer type we opt for 2D base attention mask (Mamba) or 4D causal mask (Attention)
             layer_mask = mamba_mask if decoder_layer.layer_type == "mamba" else causal_mask
 
-            if output_hidden_states:
-                all_hidden_states += (hidden_states,)
-
-            layer_outputs = decoder_layer(
+            hidden_states, attn_weights = decoder_layer(
                 hidden_states,
                 attention_mask=layer_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
-                output_attentions=output_attentions,
                 use_cache=use_cache,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
 
-            hidden_states = layer_outputs[0]
-
-            if output_attentions:
-                if layer_outputs[1] is not None:
-                    # append attentions only of attention layers. Mamba layers return `None` as the attention weights
-                    all_self_attns += (layer_outputs[1],)
-
         hidden_states = self.final_layernorm(hidden_states)
-
-        # add hidden states from the last decoder layer
-        if output_hidden_states:
-            all_hidden_states += (hidden_states,)
 
         if past_key_values and not past_key_values.has_previous_state:
             past_key_values.has_previous_state = True
@@ -1246,8 +1193,6 @@ class BambaModel(BambaPreTrainedModel):
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
-            hidden_states=all_hidden_states,
-            attentions=all_self_attns,
         )
 
     def _update_causal_mask(
@@ -1405,8 +1350,6 @@ class BambaForCausalLM(BambaPreTrainedModel, GenerationMixin):
         inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs,
@@ -1433,12 +1376,6 @@ class BambaForCausalLM(BambaPreTrainedModel, GenerationMixin):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs: BaseModelOutputWithPast = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1446,14 +1383,11 @@ class BambaForCausalLM(BambaPreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
             cache_position=cache_position,
             **kwargs,
         )
 
         hidden_states = outputs.last_hidden_state
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
@@ -1461,7 +1395,6 @@ class BambaForCausalLM(BambaPreTrainedModel, GenerationMixin):
         if labels is not None:
             loss = self.loss_function(logits=logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
             if self.z_loss_coefficient > 0:
-                # Type-match loss, but avoid upcasting large logits tensor until after it's been reduced on dim -1
                 z_loss = logits.logsumexp(dim=-1).to(dtype=loss.dtype).pow(2).mean()
                 loss = loss + self.z_loss_coefficient * z_loss
 

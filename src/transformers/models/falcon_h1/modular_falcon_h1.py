@@ -52,8 +52,8 @@ from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
-from ...utils import auto_docstring, can_return_tuple, is_torchdynamo_compiling, logging
-from ...utils.generic import is_flash_attention_requested
+from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, is_torchdynamo_compiling, logging
+from ...utils.generic import check_model_inputs, is_flash_attention_requested
 from ...utils.import_utils import is_causal_conv1d_available, is_mamba_2_ssm_available
 from .configuration_falcon_h1 import FalconH1Config
 
@@ -920,6 +920,11 @@ class FalconH1PreTrainedModel(PreTrainedModel):
     _supports_sdpa = True
     _is_stateful = True
 
+    _can_record_outputs = {
+        "hidden_states": FalconH1DecoderLayer,
+        "attentions": FalconH1Attention,
+    }
+
     @torch.no_grad()
     def _init_weights(self, module):
         super()._init_weights(module)
@@ -1000,6 +1005,7 @@ class FalconH1Model(FalconH1PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
+    @check_model_inputs
     @can_return_tuple
     @auto_docstring
     def forward(
@@ -1010,15 +1016,9 @@ class FalconH1Model(FalconH1PreTrainedModel):
         past_key_values: FalconHybridMambaAttentionDynamicCache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
         cache_position: torch.LongTensor | None = None,
-        **kwargs,  # NOOP kwargs, for now
+        **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | BaseModelOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
         use_cache = use_cache if use_cache is not None else self.config.use_cache
 
         if (input_ids is None) ^ (inputs_embeds is not None):
@@ -1044,6 +1044,9 @@ class FalconH1Model(FalconH1PreTrainedModel):
             cache_position = torch.arange(hidden_states.shape[1], device=hidden_states.device)
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
+
+        output_attentions = kwargs.get("output_attentions", False)
+        output_hidden_states = kwargs.get("output_hidden_states", False)
 
         causal_mask = self._update_causal_mask(
             attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
@@ -1224,6 +1227,8 @@ class FalconH1Model(FalconH1PreTrainedModel):
 
 
 class FalconH1ForCausalLM(LlamaForCausalLM):
+    @can_return_tuple
+    @auto_docstring
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -1233,8 +1238,6 @@ class FalconH1ForCausalLM(LlamaForCausalLM):
         inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs,
@@ -1256,12 +1259,6 @@ class FalconH1ForCausalLM(LlamaForCausalLM):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -1269,8 +1266,6 @@ class FalconH1ForCausalLM(LlamaForCausalLM):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
             cache_position=cache_position,
             **kwargs,
         )

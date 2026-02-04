@@ -32,7 +32,7 @@ from ...modeling_flash_attention_utils import FlashAttentionKwargs
 from ...modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import ModelOutput, TransformersKwargs, auto_docstring
-from ...utils.generic import can_return_tuple
+from ...utils.generic import can_return_tuple, check_model_inputs
 from ..auto.modeling_auto import AutoModelForKeypointDetection
 from .configuration_lightglue import LightGlueConfig
 
@@ -861,24 +861,21 @@ class LightGlueForKeypointMatching(LightGluePreTrainedModel):
             all_attentions,
         )
 
+    @check_model_inputs
     @can_return_tuple
     @auto_docstring
     def forward(
         self,
         pixel_values: torch.FloatTensor,
         labels: torch.LongTensor | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        **kwargs,
+        **kwargs: Unpack[TransformersKwargs],
     ) -> Union[tuple, "LightGlueKeypointMatchingOutput"]:
         loss = None
         if labels is not None:
             raise ValueError("LightGlue is not trainable, no labels should be provided.")
 
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_attentions = kwargs.get("output_attentions", self.config.output_attentions)
+        output_hidden_states = kwargs.get("output_hidden_states", self.config.output_hidden_states)
 
         if pixel_values.ndim != 5 or pixel_values.size(1) != 2:
             raise ValueError("Input must be a 5D tensor of shape (batch_size, 2, num_channels, height, width)")

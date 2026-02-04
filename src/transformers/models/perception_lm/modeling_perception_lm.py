@@ -30,6 +30,7 @@ from ...modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPool
 from ...modeling_utils import PreTrainedModel
 from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, torch_compilable_check
+from ...utils.generic import check_model_inputs
 from ..auto import AutoModel
 from .configuration_perception_lm import PerceptionLMConfig
 
@@ -99,6 +100,11 @@ class PerceptionLMPreTrainedModel(PreTrainedModel):
     _can_compile_fullgraph = True
     _supports_flex_attn = True
     _supports_attention_backend = True
+
+    _can_record_outputs = {
+        "hidden_states": "LlamaDecoderLayer",
+        "attentions": "LlamaAttention",
+    }
 
 
 @dataclass
@@ -238,6 +244,7 @@ class PerceptionLMModel(PerceptionLMPreTrainedModel):
             )
         return special_image_mask, special_video_mask
 
+    @check_model_inputs(tie_last_hidden_states=False)
     @can_return_tuple
     @auto_docstring
     def forward(
@@ -250,16 +257,10 @@ class PerceptionLMModel(PerceptionLMPreTrainedModel):
         past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **lm_kwargs,
     ) -> tuple | PerceptionLMModelOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
         if (pixel_values is not None or pixel_values_videos is not None) and inputs_embeds is not None:
@@ -294,8 +295,6 @@ class PerceptionLMModel(PerceptionLMPreTrainedModel):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
             return_dict=True,
             cache_position=cache_position,
             logits_to_keep=logits_to_keep,
@@ -344,8 +343,6 @@ class PerceptionLMForConditionalGeneration(PerceptionLMPreTrainedModel, Generati
         inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **lm_kwargs,
@@ -407,8 +404,6 @@ class PerceptionLMForConditionalGeneration(PerceptionLMPreTrainedModel, Generati
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
             cache_position=cache_position,
             logits_to_keep=logits_to_keep,
             **lm_kwargs,

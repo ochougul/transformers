@@ -268,6 +268,10 @@ class LlavaNextVideoMultiModalProjector(LlavaNextMultiModalProjector):
 
 class LlavaNextVideoPreTrainedModel(LlavaNextPreTrainedModel):
     input_modalities = ("image", "video", "text")
+    _can_record_outputs = {
+        "hidden_states": "LlamaDecoderLayer",
+        "attentions": "LlamaAttention",
+    }
 
 
 class LlavaNextVideoModel(LlavaNextModel):
@@ -455,24 +459,16 @@ class LlavaNextVideoModel(LlavaNextModel):
         vision_feature_layer: int | list[int] | None = None,
         vision_feature_select_strategy: str | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> tuple | LlavaNextVideoModelOutputWithPast:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
 
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
 
+        image_features = None
         if pixel_values is not None:
             image_features = self.get_image_features(
                 pixel_values,
@@ -487,6 +483,7 @@ class LlavaNextVideoModel(LlavaNextModel):
             )
             inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
 
+        video_features = None
         if pixel_values_videos is not None:
             video_features = self.get_video_features(
                 pixel_values_videos,
@@ -511,9 +508,6 @@ class LlavaNextVideoModel(LlavaNextModel):
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
             cache_position=cache_position,
             **kwargs,
         )
@@ -523,8 +517,8 @@ class LlavaNextVideoModel(LlavaNextModel):
             past_key_values=outputs.past_key_values,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            image_hidden_states=image_features if pixel_values is not None else None,
-            video_hidden_states=video_features if pixel_values_videos is not None else None,
+            image_hidden_states=image_features,
+            video_hidden_states=video_features,
         )
 
 
@@ -571,9 +565,6 @@ class LlavaNextVideoForConditionalGeneration(LlavaNextForConditionalGeneration):
         vision_feature_select_strategy: str | None = None,
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
-        output_attentions: bool | None = None,
-        output_hidden_states: bool | None = None,
-        return_dict: bool | None = None,
         cache_position: torch.LongTensor | None = None,
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[TransformersKwargs],
@@ -643,12 +634,6 @@ class LlavaNextVideoForConditionalGeneration(LlavaNextForConditionalGeneration):
         >>> processor.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "USER: \nWhat's the content of the image? ASSISTANT: The image shows a red stop sign on a pole, with a traditional Chinese archway (...)"
         ```"""
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         outputs = self.model(
             input_ids=input_ids,
             pixel_values=pixel_values,
@@ -660,9 +645,6 @@ class LlavaNextVideoForConditionalGeneration(LlavaNextForConditionalGeneration):
             vision_feature_layer=vision_feature_layer,
             vision_feature_select_strategy=vision_feature_select_strategy,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
             cache_position=cache_position,
             image_sizes=image_sizes,
             **kwargs,
