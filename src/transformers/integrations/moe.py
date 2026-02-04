@@ -196,7 +196,7 @@ def grouped_mm_experts_forward(
         raise ImportError(
             "torch._grouped_mm is not available. Please make sure you are using a PyTorch version that includes it (2.9+)."
         )
-
+    self.num_experts = self.gate_up_proj.shape[0]  # type: ignore[union-attr]
     device = hidden_states.device
     num_top_k = top_k_index.size(-1)
     num_tokens = hidden_states.size(0)
@@ -213,6 +213,7 @@ def grouped_mm_experts_forward(
 
     # Sort by expert for grouped processing
     perm = torch.argsort(expert_ids)
+    perm = perm[: -sum(perm==(self.num_experts))]  # for EP Router: filter
     inv_perm = torch.argsort(perm)
     expert_ids_g = expert_ids[perm]
     sample_weights_g = sample_weights[perm]
@@ -225,6 +226,7 @@ def grouped_mm_experts_forward(
     # Also there were no speedup gains from it in my experiments, even in eager mode.
     selected_gate_up = self.gate_up_proj
     selected_down = self.down_proj
+
     selected_gate_up_bias = self.gate_up_proj_bias[expert_ids_g] if self.has_bias else None
     selected_down_bias = self.down_proj_bias[expert_ids_g] if self.has_bias else None
 
