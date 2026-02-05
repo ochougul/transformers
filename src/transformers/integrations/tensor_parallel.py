@@ -317,9 +317,7 @@ def repack_weights(
     return final_ordered_tensor
 
 
-def get_tensor_shard(
-    param, empty_param, device_mesh, rank, dim, tensor_idx: int | None = None
-):
+def get_tensor_shard(param, empty_param, device_mesh, rank, dim, tensor_idx: int | None = None):
     """
     Generalized tensor sharding across a multi-dimensional device mesh.
     Extract only the fraction of the parameter owned by the given `rank` when the parameter would have gone sharding at provided `dim`.
@@ -821,9 +819,7 @@ class PackedColwiseParallel(ColwiseParallel):
             if dim < len(expected_shape):
                 # Input is unpacked (e.g., gate_proj that will be concatenated to gate_up_proj)
                 # Use regular tensor shard - concatenation will happen after
-                parameter = get_tensor_shard(
-                    param, self.empty_param, self.device_mesh, self.rank, -2
-                )
+                parameter = get_tensor_shard(param, self.empty_param, self.device_mesh, self.rank, -2)
             else:
                 # Input is already packed, use packed sharding
                 parameter = get_packed_weights(param, self.empty_param, self.device_mesh, self.rank, -2)
