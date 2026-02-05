@@ -1,4 +1,4 @@
-# Copyright 2025 Sesame and The HuggingFace Inc. team. All rights reserved.
+# Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -54,8 +54,6 @@ class VoxtralProcessorKwargs(ProcessingKwargs, total=False):
             "sampling_rate": 16000,
             "padding": True,
             "truncation": False,
-            "pad_to_multiple_of": 480000,
-            "max_source_positions": 3000,
         },
         "common_kwargs": {
             "return_tensors": "pt",
