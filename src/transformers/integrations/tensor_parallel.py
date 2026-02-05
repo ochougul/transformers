@@ -724,6 +724,7 @@ class ColwiseParallel(TensorParallelLayer):
         shape[dim] = end - start
         return tuple(shape)
 
+
 class AllReduce(TensorParallelLayer):
     """
     Column-wise parallel: weight is sharded on dim -2 (output features).
@@ -737,13 +738,12 @@ class AllReduce(TensorParallelLayer):
     @staticmethod
     def _prepare_input_fn(mod, inputs, device_mesh):
         if not getattr(mod, "_modified_for_tp", False):
-            mod.num_experts = (mod.num_experts // device_mesh.size())
+            mod.num_experts = mod.num_experts // device_mesh.size()
             mod._modified_for_tp = True
         return inputs
 
     def _prepare_output_fn(self, mod, outputs, device_mesh):
         return all_reduce_forward(outputs, device_mesh)
-
 
 
 class RowwiseParallel(TensorParallelLayer):
@@ -984,17 +984,17 @@ class GroupedGemmParallel(TensorParallelLayer):
         if isinstance(device, torch.device):
             device = device.index if device.index is not None else 0
         start = device * shard_size
-        end = (device+1) * shard_size
+        end = (device + 1) * shard_size
         # special case we don't "shard" just send this entire tensor to the correct rank.
         shape = param.get_shape() if not isinstance(param, torch.Tensor) else param.shape
         if tensor_idx is not None and start <= tensor_idx < end:
             # this tensor does need to be materialized on this device:
             return param[:].to(device=device)
-        elif tensor_idx is None: # a bias or a weight, but already merged
+        elif tensor_idx is None:  # a bias or a weight, but already merged
             return param[start:end].to(device=device, dtype=dtype)
-        elif len(shape) >=1 and tensor_idx is not None:
+        elif len(shape) >= 1 and tensor_idx is not None:
             return None
-        else: # bias case
+        else:  # bias case
             return param[:].to(device=device, dtype=dtype)
 
     def get_expected_sharded_shape(self, full_shape: tuple[int, ...] | torch.Size) -> tuple[int, ...]:

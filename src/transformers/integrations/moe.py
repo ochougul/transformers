@@ -275,10 +275,7 @@ def grouped_mm_experts_forward(
     # Restore original order
     if num_invalid > 0:
         # Create full output tensor initialized to zeros for invalid tokens
-        out_per_sample = torch.zeros(
-            expert_ids.shape[0], hidden_dim,
-            device=device, dtype=out_per_sample_g.dtype
-        )
+        out_per_sample = torch.zeros(expert_ids.shape[0], hidden_dim, device=device, dtype=out_per_sample_g.dtype)
         # Map processed outputs back to valid positions using the sorted indices
         valid_sorted_positions = perm[:-num_invalid]
         out_per_sample[valid_sorted_positions] = out_per_sample_g
