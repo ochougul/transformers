@@ -32,7 +32,7 @@ from ...generation.test_utils import GenerationTesterMixin
 from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, ids_tensor
 from ...test_pipeline_mixin import PipelineTesterMixin
-
+from ...test_tensor_parallel_mixin import TensorParallelTesterMixin
 
 if is_torch_available():
     import torch
@@ -47,6 +47,9 @@ if is_torch_available():
 
 
 class DeepseekV3ModelTester:
+    if is_torch_available():
+        causal_lm_class = DeepseekV3ForCausalLM
+
     def __init__(
         self,
         parent,
@@ -207,7 +210,7 @@ class DeepseekV3ModelTester:
 
 
 @require_torch
-class DeepseekV3ModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase):
+class DeepseekV3ModelTest(ModelTesterMixin, GenerationTesterMixin, PipelineTesterMixin, unittest.TestCase, TensorParallelTesterMixin):
     all_model_classes = (
         (
             DeepseekV3Model,
