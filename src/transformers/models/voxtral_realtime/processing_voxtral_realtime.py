@@ -32,6 +32,8 @@ from ...feature_extraction_utils import BatchFeature
 from ...processing_utils import AllKwargsForChatTemplate, AudioKwargs, ProcessingKwargs, ProcessorMixin, Unpack
 from ...tokenization_utils_base import PreTokenizedInput, TextInput
 
+import math
+
 
 logger = logging.get_logger(__name__)
 

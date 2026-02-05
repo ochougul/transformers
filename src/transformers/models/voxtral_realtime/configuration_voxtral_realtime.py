@@ -212,6 +212,8 @@ class VoxtralRealtimeConfig(PreTrainedConfig):
         self.audio_token_id = audio_token_id
         self.projector_hidden_act = projector_hidden_act
 
+        self.audio_length_per_tok = 8
+
         super().__init__(**kwargs)
 
 
