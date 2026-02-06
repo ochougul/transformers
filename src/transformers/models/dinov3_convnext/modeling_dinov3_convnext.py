@@ -232,7 +232,6 @@ class DINOv3ConvNextModel(DINOv3ConvNextPreTrainedModel):
         return BaseModelOutputWithPoolingAndNoAttention(
             last_hidden_state=hidden_states,
             pooler_output=hidden_states[:, 0],
-            hidden_states=None,  # injected by @check_model_inputs when requested
         )
 
 
@@ -270,7 +269,6 @@ class DINOv3ConvNextBackbone(BackboneMixin, DINOv3ConvNextPreTrainedModel):
 
         return BackboneOutput(
             feature_maps=tuple(feature_maps),
-            hidden_states=None,  # injected by @check_model_inputs when requested
         )
 
 
