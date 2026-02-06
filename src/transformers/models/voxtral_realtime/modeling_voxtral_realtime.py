@@ -388,7 +388,6 @@ class VoxtralRealtimeEncoderLayer(GradientCheckpointingLayer):
         self.self_attn = VoxtralRealtimeAttention(config, layer_idx)
         self.self_attn_layer_norm = VoxtralRealtimeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.activation_fn = ACT2FN[config.activation_function]
-        self.activation_dropout = config.activation_dropout
         self.final_layer_norm = VoxtralRealtimeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.mlp = VoxtralRealtimeMLP(config)
 

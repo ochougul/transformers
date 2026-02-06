@@ -190,7 +190,7 @@ class VoxtralRealtimeConfig(PreTrainedConfig):
         audio_token_id=None,
         projector_hidden_act="gelu",
         audio_length_per_tok=8,
-        num_delay_tokens=32,
+        num_delay_tokens=6,
         **kwargs,
     ):
         if isinstance(audio_config, dict):
