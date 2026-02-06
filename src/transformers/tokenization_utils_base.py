@@ -1669,6 +1669,10 @@ class PreTrainedTokenizerBase(PushToHubMixin):
             if match := re.search(other_pattern, "\n".join(remote_files)):
                 vocab_files["vocab_file"] = match.group()
 
+        # tiktoken vocab files may be named tiktoken.model
+        if "vocab_file" in vocab_files and "tiktoken.model" in remote_files:
+            vocab_files["vocab_file"] = "tiktoken.model"
+
         resolved_vocab_files = {}
         for file_id, file_path in vocab_files.items():
             if file_path is None:

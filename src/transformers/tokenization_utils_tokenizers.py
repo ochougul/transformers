@@ -241,8 +241,8 @@ class TokenizersBackend(PreTrainedTokenizerBase):
         add_prefix_space = kwargs.get("add_prefix_space", False)
         vocab_file = kwargs.get("vocab_file")
 
-        vocab = kwargs.get("vocab")
-        merges = kwargs.get("merges")
+        vocab = kwargs.pop("vocab", None)
+        merges = kwargs.pop("merges", None)
 
         fast_tokenizer = None
         if tokenizer_object is not None:
