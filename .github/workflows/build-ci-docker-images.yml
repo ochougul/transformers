@@ -32,7 +32,7 @@ jobs:
       -
         name: Set tag
         run: |
-          echo "TAG=huggingface/transformers-${{ matrix.file }}" >> "$GITHUB_ENV"
+          echo "TAG=huggingface/transformers-${{ matrix.file }}:dev" >> "$GITHUB_ENV"
       -
         name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
