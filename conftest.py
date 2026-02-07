@@ -86,11 +86,10 @@ warnings.simplefilter(action="ignore", category=FutureWarning)
 def setup_deterministic_testing():
     """
     Global fixture to ensure deterministic behavior across all tests.
-    Sets PyTorch to single-threaded mode and resets the random seed.
+    Sets PyTorch to single-threaded mode and enables deterministic algorithms.
 
-    Note: We don't use deterministic=True globally as it changes numerical behavior
-    in ways that break many tests (e.g., test_feed_forward_chunking). Instead, we rely
-    on single-threading and seed resetting for reproducibility.
+    This ensures maximum reproducibility and eliminates flaky tests caused by
+    non-deterministic operations (e.g., in generation tests).
     """
     if is_torch_available():
         import torch
@@ -98,8 +97,8 @@ def setup_deterministic_testing():
         # Force single-threaded execution to avoid non-deterministic thread scheduling
         torch.set_num_threads(1)
 
-        # Set seed but don't force deterministic algorithms (would break many tests)
-        set_seed(42, deterministic=False)
+        # Enable deterministic algorithms for maximum reproducibility
+        set_seed(42, deterministic=True)
     else:
         # Still set seed for random and numpy even without torch
         set_seed(42, deterministic=False)

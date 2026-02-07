@@ -2017,25 +2017,35 @@ class ModelTesterMixin:
         return self.model_tester.prepare_config_and_inputs_for_common()
 
     def test_feed_forward_chunking(self):
-        (
-            original_config,
-            inputs_dict,
-        ) = self.model_tester.prepare_config_and_inputs_for_common()
-        for model_class in self.all_model_classes:
-            model = model_class(copy.deepcopy(original_config))
-            model.to(torch_device)
-            model.eval()
+        # Disable deterministic algorithms for this test as it compares different computation paths
+        # (chunked vs non-chunked) which legitimately produce slightly different numerical results
+        # when deterministic mode forces different algorithm implementations
+        original_deterministic = torch.are_deterministic_algorithms_enabled()
+        torch.use_deterministic_algorithms(False)
 
-            hidden_states_no_chunk = model(**self._prepare_for_class(inputs_dict, model_class))[0]
+        try:
+            (
+                original_config,
+                inputs_dict,
+            ) = self.model_tester.prepare_config_and_inputs_for_common()
+            for model_class in self.all_model_classes:
+                model = model_class(copy.deepcopy(original_config))
+                model.to(torch_device)
+                model.eval()
 
-            set_seed(42)
-            original_config.chunk_size_feed_forward = 1
-            model = model_class(copy.deepcopy(original_config))
-            model.to(torch_device)
-            model.eval()
+                hidden_states_no_chunk = model(**self._prepare_for_class(inputs_dict, model_class))[0]
 
-            hidden_states_with_chunk = model(**self._prepare_for_class(inputs_dict, model_class))[0]
-            torch.testing.assert_close(hidden_states_no_chunk, hidden_states_with_chunk, rtol=1e-3, atol=1e-3)
+                set_seed(42)
+                original_config.chunk_size_feed_forward = 1
+                model = model_class(copy.deepcopy(original_config))
+                model.to(torch_device)
+                model.eval()
+
+                hidden_states_with_chunk = model(**self._prepare_for_class(inputs_dict, model_class))[0]
+                torch.testing.assert_close(hidden_states_no_chunk, hidden_states_with_chunk, rtol=1e-3, atol=1e-3)
+        finally:
+            # Restore original deterministic setting
+            torch.use_deterministic_algorithms(original_deterministic)
 
     def test_resize_position_vector_embeddings(self):
         if not self.test_resize_position_embeddings:
