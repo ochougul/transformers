@@ -603,6 +603,14 @@ def all_reduce_forward(x, device_mesh):
     return _AllReduceForward.apply(x, device_mesh)
 
 
+def _all_reduce_gradient(grad, device_mesh):
+    """All-reduce a parameter gradient across the TP mesh."""
+    if device_mesh.size() == 1:
+        return grad
+    dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=device_mesh.get_group(), async_op=False)
+    return grad
+
+
 def all_gather(x, device_mesh):
     """All-gather forward, split backward."""
     return _AllGather.apply(x, device_mesh)
@@ -743,6 +751,38 @@ class AllReduce(TensorParallelLayer):
 
     def _prepare_output_fn(self, mod, outputs, device_mesh):
         return all_reduce_forward(outputs, device_mesh)
+
+
+class ReplicatedInTP(TensorParallelLayer):
+    """
+    Replicated parameter with gradient all-reduce.
+
+    For parameters like q_norm/k_norm that sit between colwise and rowwise
+    layers. The parameter is replicated (not sharded), but its gradient
+    accumulates from local heads only in TP mode. This class registers a
+    backward hook to all-reduce the parameter gradient.
+    """
+
+    @staticmethod
+    def _prepare_input_fn(mod, inputs, device_mesh):
+        return inputs
+
+    @staticmethod
+    def _prepare_output_fn(mod, outputs, device_mesh):
+        return outputs
+
+    def shard_tensor(self, param, tensor_idx=None, device=None, dtype=None):
+        return param[...].to(device=device, dtype=dtype)
+
+    def prepare_module_tp(self, module, device_mesh):
+        # Use a module-level backward hook (not param.register_hook) because parameters are replaced during weight loading after this method runs.
+        # Module hooks survive parameter replacement.
+        def _backward_hook(mod, grad_input, grad_output, mesh=device_mesh):
+            for param in mod.parameters():
+                if param.grad is not None:
+                    _all_reduce_gradient(param.grad, mesh)
+
+        module.register_full_backward_hook(_backward_hook)
 
 
 class RowwiseParallel(TensorParallelLayer):
@@ -1125,6 +1165,7 @@ class ParallelInterface(GeneralInterface):
             "ep_router": RouterParallel(),
             "moe_tp_experts": MoeTensorParalellExperts(),
             "all_reduce": AllReduce(),
+            "replicated_in_tp": ReplicatedInTP(),
         }
         if is_torch_available() and _torch_distributed_available
         else {}
@@ -1142,6 +1183,7 @@ class ParallelInterface(GeneralInterface):
         "packed_rowwise": -1,
         "embedding_rowwise": 0,
         "sequence_parallel": None,
+        "replicated_in_tp": None,
     }
 
     # Bias sharding: colwise shards bias, rowwise doesn't (bias is replicated and all-reduced)
@@ -1154,6 +1196,7 @@ class ParallelInterface(GeneralInterface):
         "packed_rowwise": None,
         "embedding_rowwise": None,
         "sequence_parallel": None,
+        "replicated_in_tp": None,
     }
 
 
