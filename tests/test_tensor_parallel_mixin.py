@@ -17,6 +17,7 @@ from abc import ABC, abstractmethod
 
 from transformers import set_seed
 from transformers.conversion_mapping import _MODEL_TO_CONVERSION_PATTERN
+from transformers.integrations.tensor_parallel import _get_parameter_tp_plan
 from transformers.testing_utils import (
     backend_device_count,
     is_torch_available,
@@ -139,7 +140,8 @@ def _verify_tp_sharding(rank, model_tp, model_ref):
             # Verify sharding is correct
             for dim in range(param.ndim):
                 if param.size(dim) != param_full.size(dim):
-                    if "gate_up_proj" in name:
+                    param_plan = _get_parameter_tp_plan(name, model_tp.tp_plan, is_weight=True)
+                    if param_plan in ("packed_colwise",):
                         expected_size = param_full.size(dim) // world_size
                         assert param.size(dim) == expected_size, (
                             f"Packed weight {name} sharding incorrect: expected {expected_size}, got {param.size(dim)}"
@@ -216,9 +218,12 @@ def _test_tp_backward_impl(rank, model_path, model_class, atol, rtol):
             if grad.shape != grad_tp.shape:
                 for dim in range(grad.ndim):
                     if grad.size(dim) != grad_tp.size(dim):
-                        if "gate_up_proj" in name:
+                        param_plan = _get_parameter_tp_plan(name, model_tp.tp_plan, is_weight=True)
+                        if param_plan in ("packed_colwise",):
+                            # interleaved slicing
                             grad = get_packed_grad_shard(grad, world_size, rank, dim)
                         else:
+                            # regular slicing
                             shard_size = grad_tp.size(dim)
                             start = rank * shard_size
                             grad = grad.narrow(dim, start, shard_size)
