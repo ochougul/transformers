@@ -266,7 +266,7 @@ Expand each modality below to see a few example models for various use cases.
 <summary>Audio</summary>
 
 - Audio classification with [Whisper](https://huggingface.co/openai/whisper-large-v3-turbo)
-- Automatic speech recognition with [Moonshine](https://huggingface.co/UsefulSensors/moonshine)
+- Automatic speech recognition with [Parakeet](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3)
 - Keyword spotting with [Wav2Vec2](https://huggingface.co/superb/wav2vec2-base-superb-ks)
 - Speech to speech generation with [Moshi](https://huggingface.co/kyutai/moshiko-pytorch-bf16)
 - Text to audio with [MusicGen](https://huggingface.co/facebook/musicgen-large)
@@ -292,7 +292,7 @@ Expand each modality below to see a few example models for various use cases.
 <details>
 <summary>Multimodal</summary>
 
-- Audio or text to text with [Qwen2-Audio](https://huggingface.co/Qwen/Qwen2-Audio-7B)
+- Audio or text to text with [Voxtral](https://huggingface.co/mistralai/Voxtral-Mini-3B-2507)
 - Document question answering with [LayoutLMv3](https://huggingface.co/microsoft/layoutlmv3-base)
 - Image or text to text with [Qwen-VL](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct)
 - Image captioning [BLIP-2](https://huggingface.co/Salesforce/blip2-opt-2.7b)
