@@ -1061,7 +1061,6 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralRealtimePreTrainedModel, Ge
             **kwargs,
         )
         audio_hidden_states = audio_outputs.last_hidden_state
-
         # TODO: it is never enforced that intermediate_size * 4
         audio_hidden_states = audio_hidden_states.reshape(
             audio_hidden_states.shape[0], -1, self.config.audio_config.intermediate_size
@@ -1124,7 +1123,6 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralRealtimePreTrainedModel, Ge
         ["This audio is a humorous conversation between two friends, likely in English, where one of them is trying to figure out what the other's tattoo says."]
         ```"""
         # TODO: @eustlb: enforce the inputs
-
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
 
@@ -1166,14 +1164,22 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralRealtimePreTrainedModel, Ge
         self,
         *args,
         is_first_iteration: bool = False,
+        input_features: torch.Tensor | None = None,
         encoder_inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ):
         model_inputs = super().prepare_inputs_for_generation(*args, is_first_iteration=is_first_iteration, **kwargs)
 
-        start_idx = model_inputs["cache_position"][0] * 4
-        end_idx = (model_inputs["cache_position"][-1] + 1) * 4
-        model_inputs["encoder_inputs_embeds"] = encoder_inputs_embeds[:, start_idx:end_idx, :]
+        if encoder_inputs_embeds is not None:
+            start_idx = model_inputs["cache_position"][0] * 4
+            end_idx = (model_inputs["cache_position"][-1] + 1) * 4
+            model_inputs["encoder_inputs_embeds"] = encoder_inputs_embeds[:, start_idx:end_idx, :]
+
+        elif input_features is not None and isinstance(input_features, GeneratorType):
+            model_inputs["input_features"] = next(input_features)
+
+        else:
+            raise ValueError("TODO we should not reach this point")
 
         return model_inputs
 
@@ -1185,9 +1191,9 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralRealtimePreTrainedModel, Ge
     ) -> tuple[torch.Tensor, str | None, dict[str, torch.Tensor]]:
         inputs, input_name, model_kwargs = super()._prepare_model_inputs(inputs, bos_token_id, model_kwargs)
 
-        input_features = model_kwargs.pop("input_features", None)
-        if input_features is not None:
-            model_kwargs["encoder_inputs_embeds"] = self.audio_tower.embedder(input_features)
+        input_features = model_kwargs.get("input_features")
+        if input_features is not None and not isinstance(input_features, GeneratorType):
+            model_kwargs["encoder_inputs_embeds"] = self.audio_tower.embedder(model_kwargs.pop("input_features"))
 
         return inputs, input_name, model_kwargs
 
@@ -1265,11 +1271,13 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralRealtimePreTrainedModel, Ge
     ):
         generation_config, model_kwargs = super()._prepare_generation_config(generation_config, **kwargs)
 
-        audio_length = model_kwargs["input_features"].shape[-1]
-        num_audio_tokens = math.ceil(audio_length / self.config.audio_length_per_tok)
+        input_features = model_kwargs.get("input_features")
+        if input_features is not None and not isinstance(input_features, GeneratorType):
+            audio_length = input_features.shape[-1]
+            num_audio_tokens = math.ceil(audio_length / self.config.audio_length_per_tok)
 
-        # TODO: maybe add a warning here in case user's trying to set max_new_tokens
-        generation_config.max_length = num_audio_tokens
+            # TODO: maybe add a warning here in case user's trying to set max_new_tokens
+            generation_config.max_length = num_audio_tokens
 
         return generation_config, model_kwargs
 

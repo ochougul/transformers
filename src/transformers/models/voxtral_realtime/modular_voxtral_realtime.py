@@ -19,15 +19,22 @@ import torch.nn as nn
 
 from ... import initialization as init
 from ...activations import ACT2FN
+from ...audio_utils import mel_filter_bank
 from ...cache_utils import Cache, DynamicCache, StaticCache
 from ...generation import GenerationMixin
 from ...masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from ...modeling_layers import GradientCheckpointingLayer
 from ...modeling_outputs import BaseModelOutputWithPast, BaseModelOutputWithPooling, CausalLMOutputWithPast
 from ...modeling_utils import PreTrainedModel
+from ...models.lasr.feature_extraction_lasr import LasrFeatureExtractor
 from ...models.llama.modeling_llama import LlamaRotaryEmbedding
-from ...models.mistral.modeling_mistral import MistralAttention, MistralMLP, MistralRMSNorm, MistralDecoderLayer, MistralForCausalLM, MistralPreTrainedModel
-from ...models.mistral.configuration_mistral import MistralConfig
+from ...models.mistral.modeling_mistral import (
+    MistralAttention,
+    MistralDecoderLayer,
+    MistralForCausalLM,
+    MistralMLP,
+    MistralRMSNorm,
+)
 from ...models.voxtral.modeling_voxtral import (
     VoxtralForConditionalGeneration,
     VoxtralPreTrainedModel,
@@ -36,8 +43,6 @@ from ...processing_utils import Unpack
 from ...utils import TransformersKwargs, auto_docstring, can_return_tuple, logging
 from ...utils.generic import check_model_inputs
 from .configuration_voxtral_realtime import VoxtralRealtimeEncoderConfig
-from ...models.lasr.feature_extraction_lasr import LasrFeatureExtractor
-from ...audio_utils import mel_filter_bank
 
 
 logger = logging.get_logger(__name__)
@@ -84,7 +89,7 @@ class VoxtralRealtimeFeatureExtractor(LasrFeatureExtractor):
             )
         else:
             log_spec_max = log_spec.max()
-    
+
         log_spec = torch.maximum(log_spec, log_spec_max - 8.0)
         log_spec = (log_spec + 4.0) / 4.0
         if device != "cpu":
@@ -491,7 +496,8 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralForConditionalGeneration, G
             **kwargs,
         )
         audio_hidden_states = audio_outputs.last_hidden_state
-        audio_hidden_states = audio_hidden_states.reshape(audio_hidden_states.shape[0], -1, self.config.audio_config.intermediate_size) 
+        # TODO: it is never enforced that intermediate_size * 4
+        audio_hidden_states = audio_hidden_states.reshape(audio_hidden_states.shape[0], -1, self.config.audio_config.intermediate_size)
         audio_embeds = self.multi_modal_projector(audio_hidden_states)
         audio_outputs.pooler_output = audio_embeds
 
@@ -516,6 +522,7 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralForConditionalGeneration, G
         logits_to_keep: int | torch.Tensor = 0,
         **kwargs: Unpack[TransformersKwargs],
     ) -> CausalLMOutputWithPast:
+        # TODO: @eustlb: enforce the inputs
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings()(input_ids)
 
@@ -557,14 +564,22 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralForConditionalGeneration, G
         self,
         *args,
         is_first_iteration: bool = False,
+        input_features: torch.Tensor | None = None,
         encoder_inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ):
-        model_inputs = GenerationMixin.prepare_inputs_for_generation(*args, is_first_iteration=is_first_iteration, **kwargs)
+        model_inputs = super().prepare_inputs_for_generation(*args, is_first_iteration=is_first_iteration, **kwargs)
 
-        start_idx = model_inputs["cache_position"][0] * 4
-        end_idx = (model_inputs["cache_position"][-1] + 1) * 4
-        model_inputs["encoder_inputs_embeds"] = encoder_inputs_embeds[:, start_idx:end_idx, :]
+        if encoder_inputs_embeds is not None:
+            start_idx = model_inputs["cache_position"][0] * 4
+            end_idx = (model_inputs["cache_position"][-1] + 1) * 4
+            model_inputs["encoder_inputs_embeds"] = encoder_inputs_embeds[:, start_idx:end_idx, :]
+
+        elif input_features is not None and isinstance(input_features, GeneratorType):
+            model_inputs["input_features"] = next(input_features)
+
+        else:
+            raise ValueError("TODO we should not reach this point")
 
         return model_inputs
 
@@ -574,11 +589,11 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralForConditionalGeneration, G
         bos_token_id: torch.Tensor | None = None,
         model_kwargs: dict[str, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, str | None, dict[str, torch.Tensor]]:
-        inputs, input_name, model_kwargs = VoxtralRealtimePreTrainedModel._prepare_model_inputs(inputs, bos_token_id, model_kwargs)
+        inputs, input_name, model_kwargs = super()._prepare_model_inputs(inputs, bos_token_id, model_kwargs)
 
-        input_features = model_kwargs.pop("input_features", None)
-        if input_features is not None:
-            model_kwargs["encoder_inputs_embeds"] = self.audio_tower.embedder(input_features)
+        input_features = model_kwargs.get("input_features")
+        if input_features is not None and not isinstance(input_features, GeneratorType):
+            model_kwargs["encoder_inputs_embeds"] = self.audio_tower.embedder(model_kwargs.pop("input_features"))
 
         return inputs, input_name, model_kwargs
 
@@ -652,13 +667,16 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralForConditionalGeneration, G
         generation_config,
         **kwargs,
     ):
-        generation_config, model_kwargs =  GenerationMixin._prepare_generation_config(generation_config, **kwargs)
+        generation_config, model_kwargs = super()._prepare_generation_config(generation_config, **kwargs)
 
-        audio_length = model_kwargs["input_features"].shape[-1]
-        num_audio_tokens = math.ceil(audio_length / self.config.audio_length_per_tok)
+        input_features = model_kwargs.get("input_features")
+        if input_features is not None and not isinstance(input_features, GeneratorType):
+            audio_length = input_features.shape[-1]
+            num_audio_tokens = math.ceil(audio_length / self.config.audio_length_per_tok)
 
-        # TODO: maybe add a warning here in case user's trying to set max_new_tokens
-        generation_config.max_length = num_audio_tokens
+            # TODO: maybe add a warning here in case user's trying to set max_new_tokens
+            generation_config.max_length = num_audio_tokens
+
         return generation_config, model_kwargs
 
     def _prepare_generated_length(
