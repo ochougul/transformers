@@ -268,7 +268,7 @@ class VoxtralEncoder(VoxtralPreTrainedModel):
         self.conv2 = nn.Conv1d(embed_dim, embed_dim, kernel_size=3, stride=2, padding=1)
 
         self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
-        # self.embed_positions.requires_grad_(False)
+        self.embed_positions.requires_grad_(False)
 
         self.layers = nn.ModuleList([VoxtralEncoderLayer(config) for _ in range(config.encoder_layers)])
         self.layer_norm = nn.LayerNorm(config.d_model)
@@ -295,7 +295,6 @@ class VoxtralEncoder(VoxtralPreTrainedModel):
         self,
         input_features,
         attention_mask=None,
-        past_key_values: Cache | None = None,
         **kwargs: Unpack[TransformersKwargs],
     ) -> tuple | BaseModelOutputWithPooling:
         r"""
@@ -403,7 +402,7 @@ class VoxtralForConditionalGeneration(VoxtralPreTrainedModel, GenerationMixin):
         custom_intro="This method is used to get the audio embeddings from input features (a log mel spectrogram), meaning inferring the audio encoder and the multi-modal projector."
     )
     def get_audio_features(
-        self, input_features: torch.FloatTensor, past_key_values: Cache | None = None, **kwargs: Unpack[TransformersKwargs]
+        self, input_features: torch.FloatTensor, **kwargs: Unpack[TransformersKwargs]
     ) -> tuple | BaseModelOutputWithPooling:
         r"""
         input_features (`torch.FloatTensor`):
@@ -413,12 +412,7 @@ class VoxtralForConditionalGeneration(VoxtralPreTrainedModel, GenerationMixin):
             `input_features`, the [`AutoFeatureExtractor`] should be used for extracting the mel features, padding
             and conversion into a tensor of type `torch.FloatTensor`. See [`~WhisperFeatureExtractor.__call__`]
         """
-        audio_outputs = self.audio_tower(
-            input_features,
-            past_key_values=encoder_past_key_values,
-            return_dict=True,
-            **kwargs,
-        )
+        audio_outputs = self.audio_tower(input_features, return_dict=True, **kwargs)
         audio_hidden_states = audio_outputs.last_hidden_state
         audio_hidden_states = audio_hidden_states.reshape(-1, self.config.audio_config.intermediate_size)
         audio_embeds = self.multi_modal_projector(audio_hidden_states)
@@ -435,7 +429,6 @@ class VoxtralForConditionalGeneration(VoxtralPreTrainedModel, GenerationMixin):
         attention_mask: torch.Tensor | None = None,
         position_ids: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
-        encoder_past_key_values: Cache | None = None,
         inputs_embeds: torch.FloatTensor | None = None,
         labels: torch.LongTensor | None = None,
         use_cache: bool | None = None,
@@ -480,11 +473,7 @@ class VoxtralForConditionalGeneration(VoxtralPreTrainedModel, GenerationMixin):
             inputs_embeds = self.get_input_embeddings()(input_ids)
 
         if input_features is not None and input_ids is not None:
-            audio_embeds = self.get_audio_features(
-                input_features,
-                encoder_past_key_values=encoder_past_key_values,
-                return_dict=True,
-            ).pooler_output
+            audio_embeds = self.get_audio_features(input_features, return_dict=True).pooler_output
 
             # replace text-audio token placeholders with audio embeddings
             audio_token_mask = (input_ids == self.config.audio_token_id).unsqueeze(-1)
