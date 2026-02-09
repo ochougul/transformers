@@ -54,6 +54,8 @@ class VoxtralProcessorKwargs(ProcessingKwargs, total=False):
             "sampling_rate": 16000,
             "padding": True,
             "truncation": False,
+            "pad_to_multiple_of": 480000,
+            "max_source_positions": 3000,
         },
         "common_kwargs": {
             "return_tensors": "pt",
