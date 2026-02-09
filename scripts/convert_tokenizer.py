@@ -10,10 +10,11 @@ Usage:
 """
 
 import argparse
+
 from datasets import load_dataset
+from tokenizers import Regex, pre_tokenizers
 from tqdm import tqdm
 
-from tokenizers import Regex, pre_tokenizers
 from transformers import AutoTokenizer
 
 
@@ -45,28 +46,30 @@ def test_contractions(tok_original, tok_converted):
         orig = tok_original.encode(text, add_special_tokens=False)
         conv = tok_converted.encode(text, add_special_tokens=False)
         match = orig == conv
-        results.append({
-            "text": text,
-            "match": match,
-            "original": orig,
-            "converted": conv,
-        })
+        results.append(
+            {
+                "text": text,
+                "match": match,
+                "original": orig,
+                "converted": conv,
+            }
+        )
     return results
 
 
 def get_pattern_from_tokenizer(tok_original):
     """Try to extract the regex pattern from the original tokenizer."""
     # Try common attribute names for the pattern
-    for attr in ['pat_str', '_pat_str', 'pattern', 'regex_pattern']:
+    for attr in ["pat_str", "_pat_str", "pattern", "regex_pattern"]:
         if hasattr(tok_original, attr):
             pattern = getattr(tok_original, attr)
             if pattern and isinstance(pattern, str):
                 return pattern
 
     # Try to get from internal tokenizer
-    if hasattr(tok_original, 'tokenizer'):
+    if hasattr(tok_original, "tokenizer"):
         t = tok_original.tokenizer
-        for attr in ['_pat_str', 'pat_str', 'pattern']:
+        for attr in ["_pat_str", "pat_str", "pattern"]:
             if hasattr(t, attr):
                 pattern = getattr(t, attr)
                 if pattern and isinstance(pattern, str):
@@ -77,7 +80,7 @@ def get_pattern_from_tokenizer(tok_original):
 
 def try_fix_pretokenizer(tok_converted, tok_original, pattern=None):
     """Try different pre-tokenizer configurations to fix contraction mismatches."""
-    if not hasattr(tok_converted, '_tokenizer') or tok_converted._tokenizer is None:
+    if not hasattr(tok_converted, "_tokenizer") or tok_converted._tokenizer is None:
         return False, None
 
     # Get current pre-tokenizer to extract pattern
@@ -94,16 +97,18 @@ def try_fix_pretokenizer(tok_converted, tok_original, pattern=None):
     # Default tiktoken pattern as fallback
     if pattern is None:
         pattern = r"""(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"""
-        print(f"  Using default tiktoken pattern")
+        print("  Using default tiktoken pattern")
 
     for behavior in PRE_TOKENIZER_BEHAVIORS:
         print(f"  Trying pre-tokenizer behavior: {behavior}...")
         try:
             # Create new pre-tokenizer with different behavior
-            new_pretok = pre_tokenizers.Sequence([
-                pre_tokenizers.Split(Regex(pattern), behavior=behavior, invert=False),
-                pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False),
-            ])
+            new_pretok = pre_tokenizers.Sequence(
+                [
+                    pre_tokenizers.Split(Regex(pattern), behavior=behavior, invert=False),
+                    pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False),
+                ]
+            )
             tok_converted._tokenizer.pre_tokenizer = new_pretok
 
             # Test contractions
@@ -145,23 +150,27 @@ def validate_tokenizers(tok_original, tok_converted, dataset, num_samples=1000):
                 decoded_conv = tok_converted.decode(ids_converted)
                 decode_match = decoded_orig == decoded_conv
 
-                mismatches.append({
-                    "index": i,
-                    "field": field,
-                    "text": text[:100] + "..." if len(text) > 100 else text,
-                    "original": ids_original[:20],
-                    "converted": ids_converted[:20],
-                    "decode_match": decode_match,
-                })
-
-                if not decode_match:
-                    decode_failures.append({
+                mismatches.append(
+                    {
                         "index": i,
                         "field": field,
-                        "text": text,
-                        "decoded_orig": decoded_orig,
-                        "decoded_conv": decoded_conv,
-                    })
+                        "text": text[:100] + "..." if len(text) > 100 else text,
+                        "original": ids_original[:20],
+                        "converted": ids_converted[:20],
+                        "decode_match": decode_match,
+                    }
+                )
+
+                if not decode_match:
+                    decode_failures.append(
+                        {
+                            "index": i,
+                            "field": field,
+                            "text": text,
+                            "decoded_orig": decoded_orig,
+                            "decoded_conv": decoded_conv,
+                        }
+                    )
 
     return mismatches, decode_failures
 
@@ -187,7 +196,7 @@ def main():
 
     if not args.skip_validation:
         # Test contractions first
-        print(f"\nTesting contraction handling...")
+        print("\nTesting contraction handling...")
         contraction_results = test_contractions(tok_original, tok_converted)
         contraction_matches = sum(1 for r in contraction_results if r["match"])
         print(f"  Token ID match: {contraction_matches}/{len(contraction_results)}")
@@ -198,11 +207,11 @@ def main():
 
         # If contractions don't match, try to fix the pre-tokenizer
         if contraction_matches < len(contraction_results):
-            print(f"\nAttempting to fix pre-tokenizer for contraction handling...")
+            print("\nAttempting to fix pre-tokenizer for contraction handling...")
             fixed, behavior = try_fix_pretokenizer(tok_converted, tok_original)
 
             if fixed:
-                print(f"\nRe-testing contractions after fix...")
+                print("\nRe-testing contractions after fix...")
                 contraction_results = test_contractions(tok_original, tok_converted)
                 contraction_matches = sum(1 for r in contraction_results if r["match"])
                 print(f"  Token ID match: {contraction_matches}/{len(contraction_results)}")
@@ -210,9 +219,9 @@ def main():
                     status = "✓" if r["match"] else "✗"
                     print(f"    {status} {r['text']}: {r['original']} vs {r['converted']}")
             else:
-                print(f"  Could not find a pre-tokenizer configuration that fixes all contractions")
+                print("  Could not find a pre-tokenizer configuration that fixes all contractions")
 
-        print(f"\nLoading XNLI dataset for validation...")
+        print("\nLoading XNLI dataset for validation...")
         dataset = load_dataset("facebook/xnli", "en", split="validation")
 
         print(f"Validating on {args.num_samples} samples...")
@@ -221,7 +230,7 @@ def main():
         if mismatches:
             decode_ok = sum(1 for m in mismatches if m["decode_match"])
             print(f"\nToken ID mismatches: {len(mismatches)}")
-            print(f"Decode matches:      {decode_ok}/{len(mismatches)} ({100*decode_ok/len(mismatches):.1f}%)")
+            print(f"Decode matches:      {decode_ok}/{len(mismatches)} ({100 * decode_ok / len(mismatches):.1f}%)")
 
             if decode_failures:
                 print(f"\n❌ Found {len(decode_failures)} decode failures (text differs)!")
@@ -231,17 +240,17 @@ def main():
                     print(f"    Converted: '{m['decoded_conv'][:50]}'")
                 return 1
             else:
-                print(f"\n⚠ Token IDs differ but text decodes correctly")
+                print("\n⚠ Token IDs differ but text decodes correctly")
         else:
             print(f"\n✓ All {args.num_samples} samples match exactly!")
 
     if args.save_dir:
         print(f"\nSaving converted tokenizer to {args.save_dir}...")
         tok_converted.save_pretrained(args.save_dir)
-        print(f"  Saved!")
+        print("  Saved!")
 
     if args.push_to_hub:
-        print(f"\nPushing to Hub as PR...")
+        print("\nPushing to Hub as PR...")
         pr_description = f"""## Tokenizer Conversion
 
 This PR adds a converted tokenizer that works without `trust_remote_code=True`.
@@ -266,7 +275,12 @@ tokenizer = AutoTokenizer.from_pretrained("{args.model_name}")
 ---
 *Converted with [transformers](https://github.com/huggingface/transformers) tokenizer conversion script*
 """
-        result = tok_converted.push_to_hub(args.model_name, create_pr=True, commit_message="Add converted tokenizer (no trust_remote_code needed)", commit_description=pr_description)
+        result = tok_converted.push_to_hub(
+            args.model_name,
+            create_pr=True,
+            commit_message="Add converted tokenizer (no trust_remote_code needed)",
+            commit_description=pr_description,
+        )
         print(f"  PR URL: {result.pr_url}")
 
     print("\nDone!")
