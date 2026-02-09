@@ -11,28 +11,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import io
 
 from ...utils import auto_docstring, is_mistral_common_available, is_soundfile_available, is_torch_available, logging
 
 
 if is_torch_available():
-    import torch
+    pass
 
 if is_soundfile_available():
-    import soundfile as sf
+    pass
 
 if is_mistral_common_available():
     from mistral_common.audio import Audio
     from mistral_common.protocol.instruct.chunk import RawAudio
-    from mistral_common.protocol.transcription.request import TranscriptionRequest, StreamingMode
+    from mistral_common.protocol.transcription.request import StreamingMode, TranscriptionRequest
 
-from ...audio_utils import AudioInput, load_audio_as, make_list_of_audio
+from ...audio_utils import AudioInput, make_list_of_audio
 from ...feature_extraction_utils import BatchFeature
-from ...processing_utils import AllKwargsForChatTemplate, AudioKwargs, ProcessingKwargs, ProcessorMixin, Unpack
-from ...tokenization_utils_base import PreTokenizedInput, TextInput
-
-import math
+from ...processing_utils import AudioKwargs, ProcessingKwargs, ProcessorMixin, Unpack
 
 
 logger = logging.get_logger(__name__)
@@ -78,7 +74,8 @@ class VoxtralRealtimeProcessor(ProcessorMixin):
         audio = make_list_of_audio(audio)
         input_ids, texts, audio_arrays = [], [], []
         for audio_el in audio:
-            audio = Audio(audio_array=audio_el, sampling_rate=output_kwargs["audio_kwargs"]["sampling_rate"], format="ogg")
+            # NOTE: format here is used only for serialization and therefore we can use wav for any audio array
+            audio = Audio(audio_array=audio_el, sampling_rate=output_kwargs["audio_kwargs"]["sampling_rate"], format="wav")
             transcription_request = TranscriptionRequest(
                 audio=RawAudio.from_audio(audio),
                 streaming=StreamingMode.OFFLINE,
@@ -91,7 +88,7 @@ class VoxtralRealtimeProcessor(ProcessorMixin):
             audio_arrays.extend([el.audio_array for el in tokenized_transcription_request.audios])
 
         text_encoding = self.tokenizer(input_ids, **output_kwargs["text_kwargs"])
-        
+
         is_first_iteration = output_kwargs["audio_kwargs"].pop("is_first_iteration")
         audio_encoding = self.feature_extractor(
             audio_arrays,

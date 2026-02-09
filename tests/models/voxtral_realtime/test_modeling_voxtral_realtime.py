@@ -13,11 +13,11 @@
 # limitations under the License.
 """Testing suite for the PyTorch VoxtralRealtime model."""
 
-import tempfile
-import unittest
 import functools
+import unittest
 
 from transformers import (
+    AutoProcessor,
     VoxtralRealtimeConfig,
     VoxtralRealtimeForConditionalGeneration,
     is_torch_available,
@@ -200,7 +200,7 @@ class VoxtralRealtimeForConditionalGenerationModelTest(
     @_with_max_new_tokens(max_new_tokens=5)
     def test_generate_compile_model_forward_fullgraph(self):
         super().test_generate_compile_model_forward_fullgraph()
-    
+
     @_with_max_new_tokens(max_new_tokens=4)
     def test_generate_continue_from_past_key_values(self):
         super().test_generate_continue_from_past_key_values()
@@ -284,18 +284,18 @@ class VoxtralRealtimeForConditionalGenerationModelTest(
         pass
 
 
-# TODO: Add integration tests once checkpoint is available
-# @require_torch
-# class VoxtralRealtimeForConditionalGenerationIntegrationTest(unittest.TestCase):
-#     def setUp(self):
-#         self.checkpoint_name = "mistralai/VoxtralRealtime-Mini-3B-2507"
-#         self.dtype = torch.bfloat16
-#         self.processor = AutoProcessor.from_pretrained(self.checkpoint_name)
-#
-#     def tearDown(self):
-#         cleanup(torch_device, gc_collect=True)
-#
-#     @slow
-#     def test_realtime_streaming_inference(self):
-#         """Test streaming inference with the realtime model."""
-#         pass
+@require_torch
+class VoxtralRealtimeForConditionalGenerationIntegrationTest(unittest.TestCase):
+    def setUp(self):
+        self.checkpoint_name = "/raid/eustache/Voxtral-Mini-4B-Realtime-2602-hf"
+        self.dtype = torch.bfloat16
+        self.processor = AutoProcessor.from_pretrained(self.checkpoint_name)
+
+    def tearDown(self):
+        cleanup(torch_device, gc_collect=True)
+
+    @slow
+    def test_realtime_inference(self):
+        """Test streaming inference with the realtime model."""
+        model = VoxtralRealtimeForConditionalGeneration.from_pretrained(self.checkpoint_name, dtype=self.dtype, device_map=torch_device)
+
