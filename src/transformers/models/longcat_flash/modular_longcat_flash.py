@@ -355,7 +355,6 @@ class LongcatFlashPreTrainedModel(PreTrainedModel):
 
 
 class LongcatFlashModel(DeepseekV3Model):
-
     def __init__(self, config):
         super().__init__(config)
         self.layers = nn.ModuleList(

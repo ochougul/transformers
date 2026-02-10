@@ -675,6 +675,7 @@ class Sam2PreTrainedModel(PreTrainedModel):
         "no_object_pointer",
         "occlusion_spatial_embedding_parameter",
     ]
+
     @torch.no_grad()
     def _init_weights(self, module):
         super()._init_weights(module)
@@ -1184,7 +1185,6 @@ class Sam2MaskDecoder(SamMaskDecoder):
     """
 )
 class Sam2Model(SamModel):
-    
     _tied_weights_keys = {}
 
     def __init__(self, config: Sam2Config):

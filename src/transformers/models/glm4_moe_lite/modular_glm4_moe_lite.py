@@ -289,6 +289,7 @@ class Glm4MoeLitePreTrainedModel(Glm4MoePreTrainedModel):
 class Glm4MoeLiteModel(Glm4MoeModel):
     pass
 
+
 class Glm4MoeLiteForCausalLM(Glm4MoeForCausalLM):
     pass
 

@@ -324,6 +324,7 @@ class DeepseekV3PreTrainedModel(LlamaPreTrainedModel):
 class DeepseekV3Model(LlamaModel):
     pass
 
+
 class DeepseekV3ForCausalLM(LlamaForCausalLM):
     pass
 
