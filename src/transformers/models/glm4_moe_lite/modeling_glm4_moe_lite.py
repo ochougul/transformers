@@ -567,6 +567,7 @@ class Glm4MoeLitePreTrainedModel(PreTrainedModel):
         "attentions": Glm4MoeLiteAttention,
     }
     _keep_in_fp32_modules_strict = ["e_score_correction_bias"]
+    _keys_to_ignore_on_load_unexpected = [r"model\.layers\.47.*"]
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -581,7 +582,7 @@ class Glm4MoeLitePreTrainedModel(PreTrainedModel):
 
 @auto_docstring
 class Glm4MoeLiteModel(Glm4MoeLitePreTrainedModel):
-    _keys_to_ignore_on_load_unexpected = [r"model\.layers\.47.*"]
+    _keys_to_ignore_on_load_unexpected = [r"model\.layers\.92.*", r"model\.layers\.46.*"]
 
     def __init__(self, config: Glm4MoeLiteConfig):
         super().__init__(config)
