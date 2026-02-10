@@ -75,7 +75,9 @@ class VoxtralRealtimeProcessor(ProcessorMixin):
         input_ids, texts, audio_arrays = [], [], []
         for audio_el in audio:
             # NOTE: format here is used only for serialization and therefore we can use wav for any audio array
-            audio = Audio(audio_array=audio_el, sampling_rate=output_kwargs["audio_kwargs"]["sampling_rate"], format="wav")
+            audio = Audio(
+                audio_array=audio_el, sampling_rate=output_kwargs["audio_kwargs"]["sampling_rate"], format="wav"
+            )
             transcription_request = TranscriptionRequest(
                 audio=RawAudio.from_audio(audio),
                 streaming=StreamingMode.OFFLINE,

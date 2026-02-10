@@ -13,6 +13,8 @@
 # limitations under the License.
 import math
 from dataclasses import dataclass
+from functools import cached_property
+from types import GeneratorType
 
 import torch
 import torch.nn as nn
@@ -60,7 +62,15 @@ class VoxtralRealtimeFeatureExtractor(LasrFeatureExtractor):
         global_log_mel_max=1.5,
         **kwargs,
     ):
-        super().__init__(feature_size=feature_size, sampling_rate=sampling_rate, hop_length=hop_length, n_fft=n_fft, win_length=win_length, padding_value=padding_value, **kwargs)
+        super().__init__(
+            feature_size=feature_size,
+            sampling_rate=sampling_rate,
+            hop_length=hop_length,
+            n_fft=n_fft,
+            win_length=win_length,
+            padding_value=padding_value,
+            **kwargs,
+        )
         self.mel_filters = mel_filter_bank(
             num_frequency_bins=1 + n_fft // 2,
             num_mel_filters=feature_size,
@@ -98,31 +108,40 @@ class VoxtralRealtimeFeatureExtractor(LasrFeatureExtractor):
 
 
 class Conv1dCacheLayer:
-    def __init__(self, conv_config):
-        self.in_channels = conv_config["in_channels"]
-        self.left_pad = (conv_config["kernel_size"] - 1) * conv_config["dilation"] + 1 - conv_config["stride"]
+    def __init__(self):
         self.cache: torch.Tensor | None = None
         self.is_initialized: bool = False
 
-    def update(self, hidden_states):
-        batch_size = hidden_states.shape[0]
+    def lazy_initialization(self, hidden_states, conv_module):
+        self.left_pad = conv_module.left_pad
+        self.in_channels = conv_module.in_channels
+        self.cache = torch.zeros(
+            hidden_states.shape[0],
+            self.in_channels,
+            self.left_pad,
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        self.is_initialized = True
 
-        if not self.is_initialized:
-            self.cache = torch.zeros(
-                batch_size, self.in_channels, self.left_pad, device=hidden_states.device, dtype=hidden_states.dtype
+    def update(self, hidden_states, conv_module=None):
+        if not self.is_initialized and conv_module is not None:
+            self.lazy_initialization(hidden_states, conv_module)
+        elif not self.is_initialized:
+            raise ValueError(
+                "Conv1dCacheLayer is not initialized. Make sure to provide conv_module to the update method."
             )
-            self.is_initialized = True
 
         # get the padding states
         if self.left_pad > 0:
             shortfall = max(0, self.left_pad - hidden_states.shape[-1])
             if shortfall > 0:
-                padding_states = torch.cat([self.output_cache[:, :, -shortfall:], hidden_states], dim=-1)
+                padding_states = torch.cat([self.cache[:, :, -shortfall:], hidden_states], dim=-1)
             else:
                 padding_states = hidden_states[:, :, -self.left_pad :].clone()
         else:
             padding_states = torch.empty(
-                batch_size, self.in_channels, 0, dtype=hidden_states.dtype, device=hidden_states.device
+                hidden_states.shape[0], self.in_channels, 0, dtype=hidden_states.dtype, device=hidden_states.device
             )
 
         # update the cache
@@ -133,14 +152,14 @@ class Conv1dCacheLayer:
 
 
 class VoxtralRealtimeConv1dPaddingCache:
-    def __init__(self, config):
-        if not hasattr(config, "_conv_config"):
-            raise ValueError("TODO")
+    def __init__(self):
+        self.layers = {}
 
-        self.layers = [Conv1dCacheLayer(conv_config) for conv_config in config._conv_config]
+    def update(self, hidden_states, cache_key, conv_module):
+        if cache_key not in self.layers:
+            self.layers[cache_key] = Conv1dCacheLayer()
 
-    def update(self, hidden_states, layer_idx):
-        padding_states = self.layers[layer_idx].update(hidden_states)
+        padding_states = self.layers[cache_key].update(hidden_states, conv_module)
         padded_hidden_states = torch.cat([padding_states, hidden_states], dim=-1)
         return padded_hidden_states
 
@@ -159,24 +178,28 @@ class VoxtralRealtimeCausalConv1d(nn.Conv1d):
         in_channels: int,
         out_channels: int,
         kernel_size: int,
+        cache_key: str,
         stride: int = 1,
         dilation: int = 1,
         bias: bool = True,
-        conv_layer_idx: int | None = 0,
     ):
         super().__init__(in_channels, out_channels, kernel_size, stride=stride, dilation=dilation, bias=bias)
-        self._stride = self.stride[0]
-        self._effective_kernel_size = (kernel_size - 1) * self.dilation[0] + 1
-        self._padding_total = self._effective_kernel_size - self._stride
-        self.conv_layer_idx = conv_layer_idx
+        self.cache_key = cache_key
+
+    @cached_property
+    def left_pad(self):
+        effective_kernel_size = (self.kernel_size[0] - 1) * self.dilation[0] + 1
+        return effective_kernel_size - self.stride[0]
 
     def forward(
-        self, x: torch.Tensor, padding_cache: torch.Tensor | None = None,
+        self,
+        x: torch.Tensor,
+        padding_cache: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if padding_cache is not None:
-            x = padding_cache.update(x, self.conv_layer_idx)
+            x = padding_cache.update(x, self.cache_key, self)
         else:
-            x = nn.functional.pad(x, (self._padding_total, 0))
+            x = nn.functional.pad(x, (self.left_pad, 0))
 
         return super().forward(x)
 
@@ -203,8 +226,12 @@ class VoxtralRealtimeEmbedder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.conv1 = VoxtralRealtimeCausalConv1d(config.num_mel_bins, config.d_model, kernel_size=3, conv_layer_idx=0)
-        self.conv2 = VoxtralRealtimeCausalConv1d(config.d_model, config.d_model, kernel_size=3, stride=2, conv_layer_idx=1)
+        self.conv1 = VoxtralRealtimeCausalConv1d(
+            config.num_mel_bins, config.hidden_size, kernel_size=3, cache_key="conv1"
+        )
+        self.conv2 = VoxtralRealtimeCausalConv1d(
+            config.hidden_size, config.hidden_size, kernel_size=3, stride=2, cache_key="conv2"
+        )
 
     def forward(self, input_features, padding_cache=None):
         inputs_embeds = nn.functional.gelu(self.conv1(input_features, padding_cache=padding_cache))
@@ -329,7 +356,7 @@ class VoxtralRealtimeEncoder(VoxtralRealtimePreTrainedModel):
             raise ValueError("You must specify exactly one of input_features or inputs_embeds")
 
         if use_padding_cache and padding_cache is None:
-            padding_cache = VoxtralRealtimeConv1dPaddingCache(config=self.config)
+            padding_cache = VoxtralRealtimeConv1dPaddingCache()
 
         if inputs_embeds is None:
             inputs_embeds = self.embedder(input_features, padding_cache)
@@ -497,7 +524,9 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralForConditionalGeneration, G
         )
         audio_hidden_states = audio_outputs.last_hidden_state
         # TODO: it is never enforced that intermediate_size * 4
-        audio_hidden_states = audio_hidden_states.reshape(audio_hidden_states.shape[0], -1, self.config.audio_config.intermediate_size)
+        audio_hidden_states = audio_hidden_states.reshape(
+            audio_hidden_states.shape[0], -1, self.config.audio_config.intermediate_size
+        )
         audio_embeds = self.multi_modal_projector(audio_hidden_states)
         audio_outputs.pooler_output = audio_embeds
 
@@ -624,7 +653,9 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralForConditionalGeneration, G
         batch_size: int,
         max_cache_length: int,
     ):
-        GenerationMixin._prepare_cache_for_generation(generation_config, model_kwargs, generation_mode, batch_size, max_cache_length)
+        GenerationMixin._prepare_cache_for_generation(
+            generation_config, model_kwargs, generation_mode, batch_size, max_cache_length
+        )
 
         # NOTE: we use the encoder prefix here this is not a classical encoder-decoder model - no cross-attention
         # the model is better seen as a VLM/ AudioLM, so with an encoder that can take psat_key_values for it's forward pass
@@ -691,7 +722,14 @@ class VoxtralRealtimeForConditionalGeneration(VoxtralForConditionalGeneration, G
         # since we update max_length manually in the abobe _prepare_generation_config
         # we need to force has_default_max_length to False
         has_default_max_length = False
-        return GenerationMixin._prepare_generated_length(generation_config, has_default_max_length, has_default_min_length, model_input_name, input_ids_length, inputs_tensor)
+        return GenerationMixin._prepare_generated_length(
+            generation_config,
+            has_default_max_length,
+            has_default_min_length,
+            model_input_name,
+            input_ids_length,
+            inputs_tensor,
+        )
 
 
 __all__ = [

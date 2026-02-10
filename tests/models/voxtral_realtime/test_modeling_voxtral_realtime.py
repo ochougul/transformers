@@ -14,15 +14,14 @@
 """Testing suite for the PyTorch VoxtralRealtime model."""
 
 import functools
-from tkinter import X
 import unittest
 
 from transformers import (
     AutoProcessor,
     VoxtralRealtimeConfig,
     VoxtralRealtimeForConditionalGeneration,
-    is_torch_available,
     is_datasets_available,
+    is_torch_available,
 )
 from transformers.audio_utils import load_audio
 from transformers.testing_utils import (
@@ -37,9 +36,9 @@ from ...test_configuration_common import ConfigTester
 from ...test_modeling_common import ModelTesterMixin, floats_tensor, ids_tensor
 from ...test_pipeline_mixin import PipelineTesterMixin
 
+
 if is_datasets_available():
     import datasets
-    from datasets import Audio, load_dataset
 
 if is_torch_available():
     import torch
@@ -163,14 +162,11 @@ class VoxtralRealtimeForConditionalGenerationModelTest(
     """
     Model tester for `VoxtralRealtimeForConditionalGeneration`.
     """
+
     additional_model_inputs = ["input_features"]
 
     all_model_classes = (VoxtralRealtimeForConditionalGeneration,) if is_torch_available() else ()
-    pipeline_model_mapping = (
-        {"any-to-any": VoxtralRealtimeForConditionalGeneration}
-        if is_torch_available()
-        else {}
-    )
+    pipeline_model_mapping = {"any-to-any": VoxtralRealtimeForConditionalGeneration} if is_torch_available() else {}
 
     _is_composite = True
 
@@ -187,7 +183,9 @@ class VoxtralRealtimeForConditionalGenerationModelTest(
                     return test_func(self, *args, **kwargs)
                 finally:
                     self.model_tester._max_new_tokens = None
+
             return wrapper
+
         return decorator
 
     def prepare_config_and_inputs_for_generate(self, batch_size=2):
@@ -207,13 +205,7 @@ class VoxtralRealtimeForConditionalGenerationModelTest(
     def test_generate_compile_model_forward_fullgraph(self):
         super().test_generate_compile_model_forward_fullgraph()
 
-    @_with_max_new_tokens(max_new_tokens=4)
-    def test_generate_continue_from_past_key_values(self):
-        super().test_generate_continue_from_past_key_values()
-
-    @unittest.skip(
-        reason="VoxtralRealtime does not have a base model"
-    )
+    @unittest.skip(reason="VoxtralRealtime does not have a base model")
     def test_model_base_model_prefix(self):
         pass
 
@@ -305,7 +297,10 @@ class VoxtralRealtimeForConditionalGenerationIntegrationTest(unittest.TestCase):
         reproducer: https://gist.github.com/eustlb/980bade49311336509985f9a308e80af
         """
         model = VoxtralRealtimeForConditionalGeneration.from_pretrained(self.checkpoint_name, device_map=torch_device)
-        audio = load_audio("https://huggingface.co/datasets/hf-internal-testing/dummy-audio-samples/resolve/main/dude_where_is_my_car.wav", self.processor.feature_extractor.sampling_rate)
+        audio = load_audio(
+            "https://huggingface.co/datasets/hf-internal-testing/dummy-audio-samples/resolve/main/dude_where_is_my_car.wav",
+            self.processor.feature_extractor.sampling_rate,
+        )
 
         inputs = self.processor(audio, return_tensors="pt")
         inputs.to(model.device, dtype=model.dtype)
@@ -318,7 +313,7 @@ class VoxtralRealtimeForConditionalGenerationIntegrationTest(unittest.TestCase):
         ]
 
         self.assertEqual(decoded_outputs, EXPECTED_OUTPUT)
-    
+
     @slow
     def test_batched(self):
         """
@@ -327,12 +322,10 @@ class VoxtralRealtimeForConditionalGenerationIntegrationTest(unittest.TestCase):
         model = VoxtralRealtimeForConditionalGeneration.from_pretrained(self.checkpoint_name, device_map=torch_device)
 
         # Load dataset manually
-        ds = datasets.load_dataset(
-            "hf-internal-testing/librispeech_asr_dummy", "clean", split="validation"
-        )
+        ds = datasets.load_dataset("hf-internal-testing/librispeech_asr_dummy", "clean", split="validation")
         speech_samples = ds.sort("id")[:5]["audio"]
         input_speech = [x["array"] for x in speech_samples]
-        
+
         inputs = self.processor(input_speech, return_tensors="pt")
         inputs.to(model.device, dtype=model.dtype)
 
@@ -356,8 +349,14 @@ class VoxtralRealtimeForConditionalGenerationIntegrationTest(unittest.TestCase):
         """
         model = VoxtralRealtimeForConditionalGeneration.from_pretrained(self.checkpoint_name, device_map=torch_device)
 
-        audio1 = load_audio("https://huggingface.co/datasets/hf-internal-testing/dummy-audio-samples/resolve/main/dude_where_is_my_car.wav", self.processor.feature_extractor.sampling_rate)
-        audio2 = load_audio("https://huggingface.co/datasets/hf-internal-testing/dummy-audio-samples/resolve/main/obama.mp3", self.processor.feature_extractor.sampling_rate)
+        audio1 = load_audio(
+            "https://huggingface.co/datasets/hf-internal-testing/dummy-audio-samples/resolve/main/dude_where_is_my_car.wav",
+            self.processor.feature_extractor.sampling_rate,
+        )
+        audio2 = load_audio(
+            "https://huggingface.co/datasets/hf-internal-testing/dummy-audio-samples/resolve/main/obama.mp3",
+            self.processor.feature_extractor.sampling_rate,
+        )
 
         inputs = self.processor([audio1, audio2], return_tensors="pt")
         inputs.to(model.device, dtype=model.dtype)

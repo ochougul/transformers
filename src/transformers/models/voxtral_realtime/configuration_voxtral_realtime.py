@@ -103,8 +103,6 @@ class VoxtralRealtimeEncoderConfig(PreTrainedConfig, RotaryEmbeddingConfigMixin)
         },
         sliding_window=750,
         head_dim=64,
-
-
         **kwargs,
     ):
         self.vocab_size = vocab_size

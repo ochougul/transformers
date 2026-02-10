@@ -20,6 +20,8 @@
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import cached_property
+from types import GeneratorType
 from typing import Optional
 
 import torch
@@ -48,31 +50,40 @@ from .configuration_voxtral_realtime import (
 
 
 class Conv1dCacheLayer:
-    def __init__(self, conv_config):
-        self.in_channels = conv_config["in_channels"]
-        self.left_pad = (conv_config["kernel_size"] - 1) * conv_config["dilation"] + 1 - conv_config["stride"]
+    def __init__(self):
         self.cache: torch.Tensor | None = None
         self.is_initialized: bool = False
 
-    def update(self, hidden_states):
-        batch_size = hidden_states.shape[0]
+    def lazy_initialization(self, hidden_states, conv_module):
+        self.left_pad = conv_module.left_pad
+        self.in_channels = conv_module.in_channels
+        self.cache = torch.zeros(
+            hidden_states.shape[0],
+            self.in_channels,
+            self.left_pad,
+            device=hidden_states.device,
+            dtype=hidden_states.dtype,
+        )
+        self.is_initialized = True
 
-        if not self.is_initialized:
-            self.cache = torch.zeros(
-                batch_size, self.in_channels, self.left_pad, device=hidden_states.device, dtype=hidden_states.dtype
+    def update(self, hidden_states, conv_module=None):
+        if not self.is_initialized and conv_module is not None:
+            self.lazy_initialization(hidden_states, conv_module)
+        elif not self.is_initialized:
+            raise ValueError(
+                "Conv1dCacheLayer is not initialized. Make sure to provide conv_module to the update method."
             )
-            self.is_initialized = True
 
         # get the padding states
         if self.left_pad > 0:
             shortfall = max(0, self.left_pad - hidden_states.shape[-1])
             if shortfall > 0:
-                padding_states = torch.cat([self.output_cache[:, :, -shortfall:], hidden_states], dim=-1)
+                padding_states = torch.cat([self.cache[:, :, -shortfall:], hidden_states], dim=-1)
             else:
                 padding_states = hidden_states[:, :, -self.left_pad :].clone()
         else:
             padding_states = torch.empty(
-                batch_size, self.in_channels, 0, dtype=hidden_states.dtype, device=hidden_states.device
+                hidden_states.shape[0], self.in_channels, 0, dtype=hidden_states.dtype, device=hidden_states.device
             )
 
         # update the cache
@@ -83,14 +94,14 @@ class Conv1dCacheLayer:
 
 
 class VoxtralRealtimeConv1dPaddingCache:
-    def __init__(self, config):
-        if not hasattr(config, "_conv_config"):
-            raise ValueError("TODO")
+    def __init__(self):
+        self.layers = {}
 
-        self.layers = [Conv1dCacheLayer(conv_config) for conv_config in config._conv_config]
+    def update(self, hidden_states, cache_key, conv_module):
+        if cache_key not in self.layers:
+            self.layers[cache_key] = Conv1dCacheLayer()
 
-    def update(self, hidden_states, layer_idx):
-        padding_states = self.layers[layer_idx].update(hidden_states)
+        padding_states = self.layers[cache_key].update(hidden_states, conv_module)
         padded_hidden_states = torch.cat([padding_states, hidden_states], dim=-1)
         return padded_hidden_states
 
@@ -171,16 +182,18 @@ class VoxtralRealtimeCausalConv1d(nn.Conv1d):
         in_channels: int,
         out_channels: int,
         kernel_size: int,
+        cache_key: str,
         stride: int = 1,
         dilation: int = 1,
         bias: bool = True,
-        conv_layer_idx: int | None = 0,
     ):
         super().__init__(in_channels, out_channels, kernel_size, stride=stride, dilation=dilation, bias=bias)
-        self._stride = self.stride[0]
-        self._effective_kernel_size = (kernel_size - 1) * self.dilation[0] + 1
-        self._padding_total = self._effective_kernel_size - self._stride
-        self.conv_layer_idx = conv_layer_idx
+        self.cache_key = cache_key
+
+    @cached_property
+    def left_pad(self):
+        effective_kernel_size = (self.kernel_size[0] - 1) * self.dilation[0] + 1
+        return effective_kernel_size - self.stride[0]
 
     def forward(
         self,
@@ -188,16 +201,16 @@ class VoxtralRealtimeCausalConv1d(nn.Conv1d):
         padding_cache: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if padding_cache is not None:
-            x = padding_cache.update(x, self.conv_layer_idx)
+            x = padding_cache.update(x, self.cache_key, self)
         else:
-            x = nn.functional.pad(x, (self._padding_total, 0))
+            x = nn.functional.pad(x, (self.left_pad, 0))
 
         return super().forward(x)
 
 
 @use_kernel_forward_from_hub("RMSNorm")
 class VoxtralRealtimeRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
+    def __init__(self, hidden_size, eps: float = 1e-6) -> None:
         """
         VoxtralRealtimeRMSNorm is equivalent to T5LayerNorm
         """
@@ -205,7 +218,7 @@ class VoxtralRealtimeRMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
@@ -329,9 +342,9 @@ class VoxtralRealtimeAttention(nn.Module):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -370,9 +383,11 @@ class VoxtralRealtimeEmbedder(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.conv1 = VoxtralRealtimeCausalConv1d(config.num_mel_bins, config.d_model, kernel_size=3, conv_layer_idx=0)
+        self.conv1 = VoxtralRealtimeCausalConv1d(
+            config.num_mel_bins, config.hidden_size, kernel_size=3, cache_key="conv1"
+        )
         self.conv2 = VoxtralRealtimeCausalConv1d(
-            config.d_model, config.d_model, kernel_size=3, stride=2, conv_layer_idx=1
+            config.hidden_size, config.hidden_size, kernel_size=3, stride=2, cache_key="conv2"
         )
 
     def forward(self, input_features, padding_cache=None):
@@ -512,7 +527,7 @@ class VoxtralRealtimeEncoder(VoxtralRealtimePreTrainedModel):
             raise ValueError("You must specify exactly one of input_features or inputs_embeds")
 
         if use_padding_cache and padding_cache is None:
-            padding_cache = VoxtralRealtimeConv1dPaddingCache(config=self.config)
+            padding_cache = VoxtralRealtimeConv1dPaddingCache()
 
         if inputs_embeds is None:
             inputs_embeds = self.embedder(input_features, padding_cache)
@@ -617,9 +632,9 @@ class VoxtralRealtimeTextAttention(nn.Module):
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        attention_interface: Callable = eager_attention_forward
-        if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS.get_interface(
+            self.config._attn_implementation, eager_attention_forward
+        )
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -656,7 +671,7 @@ class VoxtralRealtimeTextMLP(nn.Module):
 
 @use_kernel_forward_from_hub("RMSNorm")
 class VoxtralRealtimeTextRMSNorm(nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
+    def __init__(self, hidden_size, eps: float = 1e-6) -> None:
         """
         VoxtralRealtimeTextRMSNorm is equivalent to T5LayerNorm
         """
@@ -664,7 +679,7 @@ class VoxtralRealtimeTextRMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
@@ -889,7 +904,7 @@ class VoxtralRealtimeTextModel(VoxtralRealtimeTextPreTrainedModel):
 @auto_docstring
 class VoxtralRealtimeTextForCausalLM(VoxtralRealtimeTextPreTrainedModel, GenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
-    _tp_plan = {"lm_head": "colwise_rep"}
+    _tp_plan = {"lm_head": "colwise_gather_output"}
     _pp_plan = {"lm_head": (["hidden_states"], ["logits"])}
 
     def __init__(self, config):
