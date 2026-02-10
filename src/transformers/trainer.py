@@ -18,13 +18,11 @@ The Trainer class, to easily train a 🤗 Transformers from scratch or finetune 
 import contextlib
 import functools
 import glob
-import importlib.metadata
 import inspect
 import json
 import math
 import os
 import random
-import re
 import shutil
 import sys
 import tempfile
@@ -63,6 +61,7 @@ from .feature_extraction_utils import FeatureExtractionMixin
 from .hyperparameter_search import ALL_HYPERPARAMETER_SEARCH_BACKENDS, default_hp_search_backend
 from .image_processing_utils import BaseImageProcessor
 from .integrations.deepspeed import deepspeed_init, deepspeed_load_checkpoint, is_deepspeed_available
+from .integrations.neftune import activate_neftune, deactivate_neftune
 from .integrations.peft import MIN_PEFT_VERSION
 from .integrations.tpu import tpu_spmd_dataloader
 from .modelcard import TrainingSummary
@@ -71,11 +70,8 @@ from .models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
     MODEL_MAPPING_NAMES,
 )
-from .optimization import Adafactor, get_scheduler
+from .optimization import get_scheduler
 from .processing_utils import ProcessorMixin
-from .pytorch_utils import (
-    is_torch_greater_or_equal_than_2_3,
-)
 from .tokenization_utils_base import PreTrainedTokenizerBase
 from .trainer_callback import (
     CallbackHandler,
@@ -87,11 +83,16 @@ from .trainer_callback import (
     TrainerControl,
     TrainerState,
 )
+from .trainer_optimizer import (
+    _OPTIMIZER_HANDLERS,
+    OptimizerContext,
+    _parse_optim_args,
+    is_optimizer_factory,
+)
 from .trainer_pt_utils import (
     EvalLoopContainer,
     IterableDatasetShard,
     LabelSmoother,
-    LayerWiseDummyOptimizer,
     LengthGroupedSampler,
     distributed_broadcast_scalars,
     distributed_concat,
@@ -117,7 +118,7 @@ from .trainer_utils import (
     SaveStrategy,
     TrainerMemoryTracker,
     TrainOutput,
-    check_target_module_exists,
+    _is_peft_model,
     default_compute_objective,
     denumpify_detensorize,
     enable_full_determinism,
@@ -125,10 +126,11 @@ from .trainer_utils import (
     get_last_checkpoint,
     has_length,
     load_sharded_checkpoint,
-    neftune_post_forward_hook,
     number_of_arguments,
+    rotate_checkpoints,
     seed_worker,
     set_seed,
+    sort_checkpoints,
     speed_metrics,
 )
 from .training_args import OptimizerNames, ParallelMode, TrainingArguments
@@ -149,28 +151,19 @@ from .utils import (
     check_torch_load_is_safe,
     find_labels,
     is_accelerate_available,
-    is_apollo_torch_available,
-    is_bitsandbytes_available,
     is_datasets_available,
-    is_galore_torch_available,
-    is_grokadamw_available,
     is_in_notebook,
     is_liger_kernel_available,
-    is_lomo_available,
     is_peft_available,
     is_sagemaker_dp_enabled,
     is_sagemaker_mp_enabled,
-    is_schedulefree_available,
     is_torch_hpu_available,
     is_torch_mlu_available,
     is_torch_musa_available,
     is_torch_neuroncore_available,
     is_torch_npu_available,
-    is_torch_optimi_available,
     is_torch_xla_available,
-    is_torchao_available,
     logging,
-    strtobool,
 )
 from .utils.import_utils import requires
 from .utils.quantization_config import QuantizationMethod
@@ -206,7 +199,7 @@ if is_sagemaker_mp_enabled():
     from .trainer_pt_utils import smp_forward_backward, smp_forward_only, smp_gather, smp_nested_concat
 
 if is_peft_available():
-    from peft import PeftMixedModel, PeftModel
+    from peft import PeftModel
 
 if is_accelerate_available():
     from accelerate import Accelerator, skip_first_batches
@@ -225,13 +218,6 @@ if is_accelerate_available():
 
     if is_deepspeed_available():
         from accelerate.utils import DeepSpeedSchedulerWrapper
-
-
-def _is_peft_model(model):
-    if is_peft_available():
-        classes_to_check = (PeftModel, PeftMixedModel)
-        return isinstance(model, classes_to_check)
-    return False
 
 
 def _get_fsdp_ckpt_kwargs():
@@ -701,8 +687,6 @@ class Trainer:
                     f"setting to {smp.state.cfg.fp16}"
                 )
                 args.fp16 = smp.state.cfg.fp16
-        if args.fp16 and args.device == torch.device("cpu") and not is_torch_greater_or_equal_than_2_3:
-            raise ValueError("Tried to use `fp16` but it is not supported on cpu. You need to have torch>=2.3")
 
         # Label smoothing
         if self.args.label_smoothing_factor != 0:
@@ -766,42 +750,6 @@ class Trainer:
             num_devices = xr.global_runtime_device_count()
             xs.set_global_mesh(xs.Mesh(np.array(range(num_devices)), (num_devices, 1), axis_names=("fsdp", "tensor")))
         self.is_fsdp_xla_v1_enabled = self.is_fsdp_xla_enabled and not self.is_fsdp_xla_v2_enabled
-
-    def _activate_neftune(self, model):
-        r"""
-        Activates the neftune as presented in this code: https://github.com/neelsjain/NEFTune and paper:
-        https://huggingface.co/papers/2310.05914
-        """
-        unwrapped_model = self.accelerator.unwrap_model(model)
-
-        if _is_peft_model(unwrapped_model):
-            embeddings = unwrapped_model.base_model.model.get_input_embeddings()
-        else:
-            embeddings = unwrapped_model.get_input_embeddings()
-
-        del unwrapped_model
-
-        embeddings.neftune_noise_alpha = self.neftune_noise_alpha
-        hook_handle = embeddings.register_forward_hook(neftune_post_forward_hook)
-        self.neftune_hook_handle = hook_handle
-        return model
-
-    def _deactivate_neftune(self, model):
-        """
-        Deactivates the neftune method. Make sure to call `_activate_neftune` first.
-        """
-        if not hasattr(self, "neftune_hook_handle"):
-            raise ValueError("Neftune is not activated make sure to call `trainer._activate_neftune()` first")
-
-        unwrapped_model = self.accelerator.unwrap_model(model)
-
-        if _is_peft_model(unwrapped_model):
-            embeddings = unwrapped_model.base_model.model.get_input_embeddings()
-        else:
-            embeddings = unwrapped_model.get_input_embeddings()
-
-        self.neftune_hook_handle.remove()
-        del embeddings.neftune_noise_alpha, unwrapped_model
 
     def add_callback(self, callback):
         """
@@ -1181,12 +1129,7 @@ class Trainer:
         `create_scheduler`) in a subclass.
         """
         self.create_optimizer()
-        if is_sagemaker_mp_enabled() and smp.state.cfg.fp16:
-            # If fp16 is enabled, we unwrap the optimizer
-            optimizer = self.optimizer.optimizer
-        else:
-            optimizer = self.optimizer
-        self.create_scheduler(num_training_steps=num_training_steps, optimizer=optimizer)
+        self.create_scheduler(num_training_steps=num_training_steps)
 
     def get_decay_parameter_names(self, model) -> list[str]:
         """
@@ -1231,22 +1174,28 @@ class Trainer:
             else:
                 optimizer_cls, optimizer_kwargs = self.get_optimizer_cls_and_kwargs(self.args, opt_model)
 
-            # Overwrite `params` in case it's created by `get_optimizer_cls_and_kwargs`
-            # e.g. for GaLore optimizer.
-            if "params" in optimizer_kwargs:
-                optimizer_grouped_parameters = optimizer_kwargs.pop("params")
+            # Check if this is a factory (for complex optimizers like Muon, Dion)
+            # Factories are instantiated first, then called with (opt_model, **kwargs)
+            if is_optimizer_factory(optimizer_cls):
+                self.optimizer = optimizer_cls()(opt_model, **optimizer_kwargs)
+            else:
+                # Standard optimizer class instantiation
+                # Overwrite `params` in case it's created by `get_optimizer_cls_and_kwargs`
+                # e.g. for GaLore optimizer.
+                if "params" in optimizer_kwargs:
+                    optimizer_grouped_parameters = optimizer_kwargs.pop("params")
 
-            # Overwrite `model` in case it's created by `get_optimizer_cls_and_kwargs`
-            # e.g. for LOMO optimizer.
-            if "model" in optimizer_kwargs:
-                optimizer_grouped_parameters = optimizer_kwargs.pop("model")
+                # Overwrite `model` in case it's created by `get_optimizer_cls_and_kwargs`
+                # e.g. for LOMO optimizer.
+                if "model" in optimizer_kwargs:
+                    optimizer_grouped_parameters = optimizer_kwargs.pop("model")
 
-            # For layer-wise dummy optimizers we overwrite optimizer_grouped_parameters with `optimizer_dict`
-            # to avoid arguments conflicts.
-            if "optimizer_dict" in optimizer_kwargs:
-                optimizer_grouped_parameters = optimizer_kwargs.pop("optimizer_dict")
+                # For layer-wise dummy optimizers we overwrite optimizer_grouped_parameters with `optimizer_dict`
+                # to avoid arguments conflicts.
+                if "optimizer_dict" in optimizer_kwargs:
+                    optimizer_grouped_parameters = optimizer_kwargs.pop("optimizer_dict")
 
-            self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
+                self.optimizer = optimizer_cls(optimizer_grouped_parameters, **optimizer_kwargs)
 
             if "bitsandbytes" in str(optimizer_cls) and optimizer_kwargs.get("optim_bits", None) == 8:
                 import bitsandbytes
@@ -1305,452 +1254,28 @@ class Trainer:
         Args:
             args (`transformers.training_args.TrainingArguments`):
                 The training arguments for the training session.
+            model (`PreTrainedModel`, *optional*):
+                The model being trained. Required for some optimizers (GaLore, Apollo, LOMO).
 
+        Returns:
+            A tuple containing the optimizer class and a dictionary of optimizer keyword arguments.
         """
+        ctx = OptimizerContext(
+            args=args,
+            model=model,
+            optimizer_kwargs={"lr": args.learning_rate},
+            adam_kwargs={
+                "betas": (args.adam_beta1, args.adam_beta2),
+                "eps": args.adam_epsilon,
+            },
+            optim_args=_parse_optim_args(args.optim_args),
+        )
 
-        # parse args.optim_args
-        optim_args = {}
-        if args.optim_args:
-            for mapping in args.optim_args.replace(" ", "").split(","):
-                key, value = mapping.split("=")
-                optim_args[key] = value
-
-        optimizer_kwargs = {"lr": args.learning_rate}
-
-        adam_kwargs = {
-            "betas": (args.adam_beta1, args.adam_beta2),
-            "eps": args.adam_epsilon,
-        }
-
-        def setup_low_rank_optimizer(
-            optimizer_name: str,
-            optimizer_mapping: dict[str, Any],
-            optim_kwargs: dict[str, Any],
-            is_layerwise_supported: bool = True,
-        ) -> tuple[Any, Any]:
-            """
-            Helper function to set up low-rank optimizers like GaLore and Apollo.
-
-            Args:
-                optimizer_name (str): Name of the optimizer.
-                optimizer_mapping (dict): Mapping of optimizer names to their classes.
-                optim_kwargs (dict): Keyword arguments for the optimizer.
-                is_layerwise_supported (bool): Whether layerwise optimization is supported.
-
-            Returns:
-                tuple[Any, Any]: Optimizer class and updated optimizer kwargs.
-            """
-            is_layerwise = optimizer_name.lower().endswith("layerwise")
-            if is_layerwise and args.parallel_mode == ParallelMode.DISTRIBUTED and is_layerwise_supported:
-                raise NotImplementedError(f"Layer-wise {optimizer_name} does not support DDP at this time")
-
-            optimizer_cls = optimizer_mapping[optimizer_name]
-
-            if args.optim_target_modules is None:
-                raise ValueError(f"You need to define `optim_target_modules` to use {optimizer_name} optimizers")
-
-            if not isinstance(args.optim_target_modules, (list, str)):
-                raise TypeError(
-                    f"`optim_target_modules` must be a list of strings, a regex string, or 'all-linear'. Got: {args.optim_target_modules}"
-                )
-
-            if model is None:
-                raise ValueError(f"You need to pass a model to initialize {optimizer_name} optimizer.")
-
-            all_linear = (
-                isinstance(args.optim_target_modules, str)
-                and args.optim_target_modules.replace("_", "-") == "all-linear"
-            )
-
-            target_params_names = []
-            for module_name, module in model.named_modules():
-                target_module_exists, is_regex = check_target_module_exists(
-                    args.optim_target_modules, module_name, return_is_regex=True
-                )
-
-                if not isinstance(module, nn.Linear):
-                    if target_module_exists and not is_regex:
-                        logger.warning(
-                            f"{module_name} matched but ignored. {optimizer_name} only supports linear layers."
-                        )
-                    continue
-
-                if not target_module_exists and not all_linear:
-                    continue
-
-                target_params_names.append(module_name + ".weight")
-
-            if len(target_params_names) == 0:
-                raise ValueError(f"No target modules found for {optimizer_name} ({args.optim_target_modules}).")
-
-            target_params = [p for n, p in model.named_parameters() if n in target_params_names]
-            non_target_params = [p for n, p in model.named_parameters() if n not in target_params_names]
-            optim_kwargs.update(optim_args)
-
-            param_groups = [
-                {"params": non_target_params},
-                {"params": target_params, **optim_kwargs},
-            ]
-
-            if is_layerwise:
-                if args.gradient_accumulation_steps != 1:
-                    raise ValueError(f"Layerwise {optimizer_name} does not support gradient accumulation!")
-
-                optimizer_dict = {}
-                for param in non_target_params:
-                    optimizer_dict[param] = optimizer_cls([{"params": [param]}], **optimizer_kwargs)
-                for param in target_params:
-                    optimizer_dict[param] = optimizer_cls([{"params": [param], **optim_kwargs}], **optimizer_kwargs)
-
-                def optimizer_hook(param):
-                    if param.grad is not None:
-                        optimizer_dict[param].step()
-                        optimizer_dict[param].zero_grad()
-
-                for param in model.parameters():
-                    if param.requires_grad:
-                        param.register_post_accumulate_grad_hook(optimizer_hook)
-
-                optimizer_cls = LayerWiseDummyOptimizer
-                optimizer_kwargs.update({"optimizer_dict": optimizer_dict})
-
-            optimizer_kwargs.update({"params": param_groups})
-            return optimizer_cls, optimizer_kwargs
-
-        if args.optim == OptimizerNames.ADAFACTOR:
-            optimizer_cls = Adafactor
-            optimizer_kwargs.update({"scale_parameter": False, "relative_step": False})
-        elif args.optim in [OptimizerNames.ADAMW_TORCH, OptimizerNames.ADAMW_TORCH_FUSED]:
-            from torch.optim import AdamW
-
-            optimizer_cls = AdamW
-            optimizer_kwargs.update(adam_kwargs)
-            if args.optim == OptimizerNames.ADAMW_TORCH_FUSED:
-                optimizer_kwargs.update({"fused": True})
-        elif args.optim == OptimizerNames.ADAMW_TORCH_XLA:
-            try:
-                from torch_xla.amp.syncfree import AdamW
-
-                optimizer_cls = AdamW
-                optimizer_kwargs.update(adam_kwargs)
-            except ImportError:
-                raise ValueError("Trainer failed to import syncfree AdamW from torch_xla.")
-        elif args.optim == OptimizerNames.ADAMW_TORCH_NPU_FUSED:
-            try:
-                from torch_npu.optim import NpuFusedAdamW
-
-                optimizer_cls = NpuFusedAdamW
-                optimizer_kwargs.update(adam_kwargs)
-            except ImportError:
-                raise ValueError("Trainer failed to import FusedAdamW from torch_npu.")
-        elif args.optim == OptimizerNames.ADAMW_APEX_FUSED:
-            try:
-                from apex.optimizers import FusedAdam
-
-                optimizer_cls = FusedAdam
-                optimizer_kwargs.update(adam_kwargs)
-            except ImportError:
-                raise ValueError("Trainer tried to instantiate apex FusedAdam but apex is not installed!")
-        elif args.optim in [
-            OptimizerNames.ADAMW_BNB,
-            OptimizerNames.ADAMW_8BIT,
-            OptimizerNames.PAGED_ADAMW,
-            OptimizerNames.PAGED_ADAMW_8BIT,
-            OptimizerNames.ADEMAMIX,
-            OptimizerNames.ADEMAMIX_8BIT,
-            OptimizerNames.PAGED_ADEMAMIX,
-            OptimizerNames.PAGED_ADEMAMIX_8BIT,
-            OptimizerNames.LION,
-            OptimizerNames.LION_8BIT,
-            OptimizerNames.PAGED_LION,
-            OptimizerNames.PAGED_LION_8BIT,
-            OptimizerNames.RMSPROP_BNB,
-            OptimizerNames.RMSPROP_8BIT,
-            OptimizerNames.RMSPROP_32BIT,
-        ]:
-            if not is_bitsandbytes_available():
-                raise ImportError(
-                    "You need to install `bitsandbytes` in order to use bitsandbytes optimizers: `pip install -U bitsandbytes`"
-                )
-
-            from bitsandbytes.optim import AdamW, Lion, RMSprop
-
-            is_paged = False
-            optim_bits = 32
-            optimizer_cls = None
-            additional_optim_kwargs = adam_kwargs
-            if "paged" in args.optim:
-                is_paged = True
-            if "8bit" in args.optim:
-                optim_bits = 8
-            if "adam" in args.optim:
-                optimizer_cls = AdamW
-            elif "lion" in args.optim:
-                optimizer_cls = Lion
-                additional_optim_kwargs = {"betas": (args.adam_beta1, args.adam_beta2)}
-            elif "rmsprop" in args.optim:
-                optimizer_cls = RMSprop
-                # Above we pass all `adam_kwargs` to the optimizer, here
-                # we only pass `optim_args` which can be passed by the user.
-                additional_optim_kwargs = optim_args
-            elif "ademamix" in args.optim:
-                from bitsandbytes.optim import AdEMAMix
-
-                optimizer_cls = AdEMAMix
-                additional_optim_kwargs = {
-                    "betas": (
-                        float(optim_args.get("beta1", args.adam_beta1)),
-                        float(optim_args.get("beta2", args.adam_beta2)),
-                        float(optim_args.get("beta3", 0.9999)),
-                    ),
-                    "alpha": float(optim_args.get("alpha", 5.0)),
-                    "eps": float(optim_args.get("eps", args.adam_epsilon)),
-                }
-
-                if "t_alpha" in optim_args:
-                    additional_optim_kwargs["t_alpha"] = int(optim_args["t_alpha"])
-
-                if "t_beta3" in optim_args:
-                    additional_optim_kwargs["t_beta3"] = int(optim_args["t_beta3"])
-
-            bnb_kwargs = {"optim_bits": optim_bits}
-            if "rmsprop" not in args.optim:
-                bnb_kwargs["is_paged"] = is_paged
-
-            optimizer_kwargs.update(additional_optim_kwargs)
-            optimizer_kwargs.update(bnb_kwargs)
-        elif args.optim == OptimizerNames.ADAMW_ANYPRECISION:
-            try:
-                from torchdistx.optimizers import AnyPrecisionAdamW
-
-                optimizer_cls = AnyPrecisionAdamW
-                optimizer_kwargs.update(adam_kwargs)
-
-                # TODO Change dtypes back to M=FP32, Var = BF16, Kahan = False once they can be cast together in torchdistx.
-                optimizer_kwargs.update(
-                    {
-                        "use_kahan_summation": strtobool(optim_args.get("use_kahan_summation", "False")),
-                        "momentum_dtype": getattr(torch, optim_args.get("momentum_dtype", "float32")),
-                        "variance_dtype": getattr(torch, optim_args.get("variance_dtype", "float32")),
-                        "compensation_buffer_dtype": getattr(
-                            torch, optim_args.get("compensation_buffer_dtype", "bfloat16")
-                        ),
-                    }
-                )
-            except ImportError:
-                raise ValueError("Please install https://github.com/pytorch/torchdistx")
-        elif args.optim == OptimizerNames.SGD:
-            optimizer_cls = torch.optim.SGD
-        elif args.optim == OptimizerNames.ADAGRAD:
-            optimizer_cls = torch.optim.Adagrad
-        elif args.optim == OptimizerNames.RMSPROP:
-            optimizer_cls = torch.optim.RMSprop
-        elif args.optim in [
-            OptimizerNames.GALORE_ADAMW,
-            OptimizerNames.GALORE_ADAMW_8BIT,
-            OptimizerNames.GALORE_ADAFACTOR,
-            OptimizerNames.GALORE_ADAMW_LAYERWISE,
-            OptimizerNames.GALORE_ADAMW_8BIT_LAYERWISE,
-            OptimizerNames.GALORE_ADAFACTOR_LAYERWISE,
-        ]:
-            if not is_galore_torch_available():
-                raise ImportError(
-                    "You need to install `galore_torch` in order to use GaLore optimizers"
-                    " install it with `pip install git+https://github.com/jiaweizzhao/GaLore`"
-                )
-            from galore_torch import GaLoreAdafactor, GaLoreAdamW, GaLoreAdamW8bit
-
-            optimizer_mapping = {
-                OptimizerNames.GALORE_ADAMW: GaLoreAdamW,
-                OptimizerNames.GALORE_ADAMW_8BIT: GaLoreAdamW8bit,
-                OptimizerNames.GALORE_ADAFACTOR: GaLoreAdafactor,
-                OptimizerNames.GALORE_ADAMW_LAYERWISE: GaLoreAdamW,
-                OptimizerNames.GALORE_ADAMW_8BIT_LAYERWISE: GaLoreAdamW8bit,
-                OptimizerNames.GALORE_ADAFACTOR_LAYERWISE: GaLoreAdafactor,
-            }
-
-            galore_optim_kwargs = {
-                "rank": int(optim_args.pop("rank", 128)),
-                "update_proj_gap": int(optim_args.pop("update_proj_gap", 200)),
-                "scale": float(optim_args.pop("scale", 0.25)),
-                "proj_type": optim_args.pop("proj_type", "std"),
-            }
-
-            optimizer_cls, optimizer_kwargs = setup_low_rank_optimizer(
-                args.optim, optimizer_mapping, galore_optim_kwargs
-            )
-            if args.optim == OptimizerNames.GALORE_ADAFACTOR:
-                optimizer_kwargs.update({"scale_parameter": False, "relative_step": False})
-        elif args.optim in [
-            OptimizerNames.APOLLO_ADAMW,
-            OptimizerNames.APOLLO_ADAMW_LAYERWISE,
-        ]:
-            if not is_apollo_torch_available():
-                raise ImportError(
-                    "You need to install `apollo_torch` in order to use APOLLO optimizers"
-                    " install it with `pip install git+https://github.com/zhuhanqing/APOLLO`"
-                )
-            from apollo_torch import APOLLOAdamW
-
-            optimizer_mapping = {
-                OptimizerNames.APOLLO_ADAMW: APOLLOAdamW,
-                OptimizerNames.APOLLO_ADAMW_LAYERWISE: APOLLOAdamW,
-            }
-
-            apollo_optim_kwargs = {
-                "rank": int(optim_args.pop("rank", 128)),
-                "proj": optim_args.pop("proj", "random"),
-                "scale_type": optim_args.pop("scale_type", "channel"),
-                "update_proj_gap": int(optim_args.pop("update_proj_gap", 200)),
-                "scale": float(optim_args.pop("scale", 1.0)),
-                "proj_type": optim_args.pop("proj_type", "std"),
-            }
-            apollo_optim_kwargs.update(adam_kwargs)
-
-            optimizer_cls, optimizer_kwargs = setup_low_rank_optimizer(
-                args.optim, optimizer_mapping, apollo_optim_kwargs
-            )
-        elif args.optim in [OptimizerNames.LOMO, OptimizerNames.ADALOMO]:
-            if not is_lomo_available():
-                raise ImportError(
-                    "You need to install `lomo_optim` in order to use LOMO optimizers"
-                    " install it with `pip install lomo-optim`"
-                )
-
-            if model is None:
-                raise ValueError("You need to pass a `model` in order to correctly initialize a LOMO optimizer.")
-
-            from lomo_optim import AdaLomo, Lomo
-
-            if "ada" in args.optim:
-                optimizer_cls = AdaLomo
-            else:
-                optimizer_cls = Lomo
-
-            optimizer_kwargs.update({"model": model})
-        elif args.optim == OptimizerNames.GROKADAMW:
-            if not is_grokadamw_available():
-                raise ValueError("Please install grokadamw with `pip install grokadamw`")
-
-            from grokadamw import GrokAdamW
-
-            optimizer_cls = GrokAdamW
-            optimizer_kwargs.update(
-                {
-                    "alpha_init": float(optim_args.get("alpha_init", 0.98)),
-                    "lamb": float(optim_args.get("lamb", 2.0)),
-                    "gamma": float(optim_args.get("gamma", 0.1)),
-                    "grokking_signal_decay_rate": float(optim_args.get("grokking_signal_decay_rate", 0.1)),
-                    "gradient_clipping": float(optim_args.get("gradient_clipping", 1.0)),
-                }
-            )
-        elif args.optim in [
-            OptimizerNames.ADAMW_TORCH_4BIT,
-            OptimizerNames.ADAMW_TORCH_8BIT,
-        ]:
-            if not is_torchao_available() or version.parse(importlib.metadata.version("torchao")) < version.parse(
-                "0.4.0"
-            ):
-                raise ImportError(
-                    "You need to have `torchao>=0.4.0` in order to use torch 4-bit optimizers."
-                    "Install it with `pip install torchao` or follow the instructions here: https://github.com/pytorch/ao"
-                )
-            if version.parse(importlib.metadata.version("torch")) <= version.parse("2.4"):
-                raise ImportError(
-                    "You need to have `torch>2.4` in order to use torch 4-bit optimizers. "
-                    "Install it with `pip install --upgrade torch` it is available on pipy. Otherwise, you need to install torch nightly."
-                )
-            if version.parse(importlib.metadata.version("torchao")) >= version.parse("0.11.0"):
-                # https://github.com/pytorch/ao/pull/2159
-                from torchao.optim import AdamW4bit, AdamW8bit
-            else:
-                from torchao.prototype.low_bit_optim import AdamW4bit, AdamW8bit
-            if args.optim == OptimizerNames.ADAMW_TORCH_4BIT:
-                optimizer_cls = AdamW4bit
-            elif args.optim == OptimizerNames.ADAMW_TORCH_8BIT:
-                optimizer_cls = AdamW8bit
-            else:
-                raise ValueError("Invalid optimizer")
-            optimizer_kwargs.update(
-                {
-                    "block_size": optim_args.get("block_size", 256),
-                    "bf16_stochastic_round": strtobool(optim_args.get("bf16_stochastic_round", "False")),
-                }
-            )
-            optimizer_kwargs.update(adam_kwargs)
-        elif args.optim in [
-            OptimizerNames.SCHEDULE_FREE_RADAM,
-            OptimizerNames.SCHEDULE_FREE_ADAMW,
-            OptimizerNames.SCHEDULE_FREE_SGD,
-        ]:
-            if not is_schedulefree_available():
-                raise ImportError(
-                    "You need to install `schedulefree` in order to use schedulefree optimizers. "
-                    "Install it with `pip install schedulefree.`"
-                )
-            from schedulefree import AdamWScheduleFree, SGDScheduleFree
-
-            additional_optim_kwargs = {}
-            require_warmup = True
-
-            if args.optim == OptimizerNames.SCHEDULE_FREE_RADAM:
-                if not is_schedulefree_available("1.4.0"):
-                    raise ImportError(
-                        "You need to install `schedulefree>=1.4.0` in order to use RAdamScheduleFree optimizer. "
-                        "Install it with `pip install schedulefree.`"
-                    )
-                from schedulefree import RAdamScheduleFree
-
-                optimizer_cls = RAdamScheduleFree
-                additional_optim_kwargs = adam_kwargs
-                require_warmup = False
-            elif args.optim == OptimizerNames.SCHEDULE_FREE_ADAMW:
-                optimizer_cls = AdamWScheduleFree
-                additional_optim_kwargs = adam_kwargs
-            elif args.optim == OptimizerNames.SCHEDULE_FREE_SGD:
-                optimizer_cls = SGDScheduleFree
-            else:
-                raise ValueError("Invalid schedulefree optimizer")
-
-            additional_optim_kwargs["weight_decay"] = args.weight_decay
-            if require_warmup:
-                additional_optim_kwargs["warmup_steps"] = args.warmup_steps
-            additional_optim_kwargs.update(
-                {
-                    "weight_lr_power": float(optim_args.get("weight_lr_power", 2.0)),
-                    "r": float(optim_args.get("r", 0.0)),
-                }
-            )
-            optimizer_kwargs.update(additional_optim_kwargs)
-        elif args.optim == OptimizerNames.STABLE_ADAMW:
-            if not is_torch_optimi_available():
-                raise ImportError(
-                    "You need to install `torch-optimi` in order to use stable_adamw optimizers. "
-                    "Install it with `pip install torch-optimi`."
-                )
-            from optimi import StableAdamW
-
-            max_lr = optim_args.pop("max_lr", None)
-            if max_lr is not None:
-                max_lr = float(max_lr)
-
-            kahan_sum = optim_args.pop("kahan_sum", None)
-            if kahan_sum is not None:
-                kahan_sum = bool(kahan_sum)
-
-            adam_kwargs["weight_decay"] = args.weight_decay
-            stable_adamw_kwargs = {
-                "decouple_lr": bool(optim_args.pop("decouple_lr", False)),
-                "max_lr": max_lr,
-                "kahan_sum": kahan_sum,
-            }
-
-            optimizer_cls = StableAdamW
-            optimizer_kwargs.update(adam_kwargs)
-            optimizer_kwargs.update(stable_adamw_kwargs)
-        else:
+        handler = _OPTIMIZER_HANDLERS.get(args.optim)
+        if handler is None:
             raise ValueError(f"Trainer cannot instantiate unsupported optimizer: {args.optim}")
-        return optimizer_cls, optimizer_kwargs
+
+        return handler(ctx)
 
     def create_scheduler(self, num_training_steps: int, optimizer: torch.optim.Optimizer = None):
         """
@@ -1761,9 +1286,15 @@ class Trainer:
             num_training_steps (int): The number of training steps to do.
         """
         if self.lr_scheduler is None:
+            if optimizer is None:
+                if is_sagemaker_mp_enabled() and smp.state.cfg.fp16:
+                    # If fp16 is enabled, we unwrap the optimizer
+                    optimizer = self.optimizer.optimizer
+                else:
+                    optimizer = self.optimizer
             self.lr_scheduler = get_scheduler(
                 self.args.lr_scheduler_type,
-                optimizer=self.optimizer if optimizer is None else optimizer,
+                optimizer=optimizer,
                 num_warmup_steps=self.args.get_warmup_steps(num_training_steps),
                 num_training_steps=num_training_steps,
                 scheduler_specific_kwargs=self.args.lr_scheduler_kwargs,
@@ -2109,7 +1640,7 @@ class Trainer:
 
         # Attach NEFTune hooks if necessary
         if self.neftune_noise_alpha is not None:
-            self.model = self._activate_neftune(self.model)
+            self.neftune_hook_handle = activate_neftune(self.model, self.neftune_noise_alpha, self.accelerator)
 
         # do_train is not a reliable argument, as it might not be set and .train() still called, so
         # the following is a workaround:
@@ -2146,7 +1677,10 @@ class Trainer:
                 self._load_from_checkpoint(resume_from_checkpoint)
             # In case of repeating the find_executable_batch_size, set `self._train_batch_size` properly
             state = TrainerState.load_from_json(os.path.join(resume_from_checkpoint, TRAINER_STATE_NAME))
-            if state.train_batch_size is not None:
+            # Only restore the checkpoint's train_batch_size when using auto_find_batch_size,
+            # as that feature needs to resume with the automatically-found batch size.
+            # Otherwise, use the current args batch size to allow users to change batch configuration.
+            if state.train_batch_size is not None and args.auto_find_batch_size:
                 self._train_batch_size = state.train_batch_size
 
         # If model was re-initialized, put it on the right device and update self.model_wrapped
@@ -2292,7 +1826,7 @@ class Trainer:
             self.optimizer, self.lr_scheduler = deepspeed_init(self, num_training_steps=max_steps)
 
         if not delay_optimizer_creation:
-            self.create_optimizer_and_scheduler(num_training_steps=max_steps)
+            self.create_optimizer()
 
         self.state = TrainerState(
             stateful_callbacks=[
@@ -2313,7 +1847,7 @@ class Trainer:
 
         # as the model is wrapped, don't use `accelerator.prepare`
         # this is for unhandled cases such as
-        # FSDP-XLA, SageMaker MP/DP, DataParallel, IPEX
+        # FSDP-XLA, SageMaker MP/DP, DataParallel
         use_accelerator_prepare = model is self.model
 
         if use_accelerator_prepare and self.is_fsdp_enabled:
@@ -2327,20 +1861,27 @@ class Trainer:
                 self._fsdp_qlora_plugin_updates()
                 if self.accelerator.mixed_precision != "fp8":
                     self.model = self.accelerator.prepare(self.model)
-            self.create_optimizer_and_scheduler(num_training_steps=max_steps)
+            self.create_optimizer()
 
         # prepare using `accelerator` prepare
         if use_accelerator_prepare:
             self.model.train()
-            if hasattr(self.lr_scheduler, "step"):
-                model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
+            if self.is_deepspeed_enabled:
+                from accelerate.utils import DummyScheduler
+
+                if isinstance(self.lr_scheduler, DummyScheduler):
+                    model, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
+                        self.model, self.optimizer, self.lr_scheduler
+                    )
+                else:
+                    model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
             else:
-                # to handle cases wherein we pass "DummyScheduler" such as when it is specified in DeepSpeed config.
-                model, self.optimizer, self.lr_scheduler = self.accelerator.prepare(
-                    self.model, self.optimizer, self.lr_scheduler
-                )
+                model, self.optimizer = self.accelerator.prepare(self.model, self.optimizer)
         else:
             self.optimizer = self.accelerator.prepare(self.optimizer)
+
+        # Create scheduler now that the optimizer won't change anymore
+        self.create_scheduler(num_training_steps=max_steps)
 
         # since DataLoader was Accelerate prepared w/o a model arg in the same call, we now have to complete the DL wrapping for ALST/UlyssesSP, after model has been prepared
         pc = getattr(self.accelerator, "parallelism_config", None)
@@ -2680,7 +2221,9 @@ class Trainer:
         self.log(metrics)
 
         run_dir = self._get_output_dir(trial)
-        checkpoints_sorted = self._sorted_checkpoints(use_mtime=False, output_dir=run_dir)
+        checkpoints_sorted = sort_checkpoints(
+            output_dir=run_dir, best_model_checkpoint=self.state.best_model_checkpoint
+        )
 
         # Delete the last checkpoint when save_total_limit=1 if it's different from the best checkpoint and process allowed to save.
         if self.args.should_save and self.state.best_model_checkpoint is not None and self.args.save_total_limit == 1:
@@ -2697,7 +2240,7 @@ class Trainer:
         # After training we make sure to retrieve back the original forward pass method
         # for the embedding layer by removing the forward post hook.
         if self.neftune_noise_alpha is not None:
-            self._deactivate_neftune(self.model)
+            deactivate_neftune(self.model, self.neftune_hook_handle, self.accelerator)
 
         return TrainOutput(self.state.global_step, train_loss, metrics)
 
@@ -3166,8 +2709,13 @@ class Trainer:
 
         # Maybe delete some older checkpoints.
         if self.args.should_save:
-            # we use mtime as default, filesystems without mtime support will be detected in `_sorted_checkpoints`
-            self._rotate_checkpoints(use_mtime=True, output_dir=run_dir)
+            # we use mtime as default, filesystems without mtime support will be detected in `sort_checkpoints`
+            rotate_checkpoints(
+                output_dir=run_dir,
+                save_total_limit=self.args.save_total_limit,
+                best_model_checkpoint=self.state.best_model_checkpoint,
+                use_mtime=True,
+            )
 
     def _save_rng_state(self, output_dir):
         # Save RNG state in non-distributed training
@@ -3865,7 +3413,7 @@ class Trainer:
         make sure to overwrite `self.model_accepts_loss_kwargs` to `False`. Otherwise, the loss calculating might be slightly inaccurate when performing gradient accumulation.
         """
         pc = getattr(self.accelerator, "parallelism_config", None)
-        if pc is not None and pc.sp_backend == "deepspeed" and pc.sp_enabled:
+        if pc is not None and pc.sp_backend == "deepspeed" and pc.sp_enabled and self.model.training:
             return self._deepspeed_sp_compute_loss(model, inputs, return_outputs, pc)
 
         if (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
@@ -3952,8 +3500,20 @@ class Trainer:
         outputs = model(**inputs)
         loss = outputs.loss
 
-        sp_group = self.accelerator.torch_device_mesh["sp"].get_group()
-        sp_world_size = pc.sp_size
+        # Prefer DeepSpeed SP groups when using Ulysses; otherwise fall back to torch device mesh.
+        if pc.sp_backend == "deepspeed" and pc.sp_size > 1:
+            from deepspeed.utils import groups
+
+            sp_group = groups._get_sequence_parallel_group()
+            sp_world_size = groups._get_sequence_parallel_world_size()
+        elif self.accelerator.torch_device_mesh is not None:
+            sp_group = self.accelerator.torch_device_mesh["sp"].get_group()
+            sp_world_size = pc.sp_size
+        else:
+            raise ValueError(
+                "Sequence parallelism is enabled but no SP process group is available. "
+                "Ensure torch_device_mesh is initialized or sp_backend='deepspeed' with sp_size > 1."
+            )
         # differentiable weighted per-shard-loss aggregation across ranks
         losses_per_rank = torch.distributed.nn.functional.all_gather(loss, group=sp_group)
         # special dealing with SFT that has prompt tokens that aren't used in loss computation
@@ -4156,68 +3716,6 @@ class Trainer:
         else:
             self.state.total_flos += self.current_flos
             self.current_flos = 0
-
-    def _sorted_checkpoints(
-        self, output_dir=None, checkpoint_prefix=PREFIX_CHECKPOINT_DIR, use_mtime=False
-    ) -> list[str]:
-        ordering_and_checkpoint_path = []
-
-        glob_checkpoints = [str(x) for x in Path(output_dir).glob(f"{checkpoint_prefix}-*") if os.path.isdir(x)]
-
-        for path in glob_checkpoints:
-            if use_mtime:
-                ordering_and_checkpoint_path.append((os.path.getmtime(path), path))
-            else:
-                regex_match = re.match(f".*{checkpoint_prefix}-([0-9]+)", path)
-                if regex_match is not None and regex_match.groups() is not None:
-                    ordering_and_checkpoint_path.append((int(regex_match.groups()[0]), path))
-
-        checkpoints_sorted = sorted(ordering_and_checkpoint_path)
-        # mtime is not reliable on all filesystems, especially on some fuse fs in cloud environments
-        # so we check if the mtime is fake and fallback to numerical ordering if needed
-        if use_mtime and len(ordering_and_checkpoint_path) > 1:
-            mtime_diff = checkpoints_sorted[-1][0] - checkpoints_sorted[0][0]
-            if mtime_diff < 1.0:  # less than 1 second, which is almost impossible when mtime works fine
-                warnings.warn("mtime may not be reliable on this filesystem, falling back to numerical ordering")
-                return self._sorted_checkpoints(
-                    use_mtime=False, output_dir=output_dir, checkpoint_prefix=checkpoint_prefix
-                )
-        checkpoints_sorted = [checkpoint[1] for checkpoint in checkpoints_sorted]
-
-        # Make sure we don't delete the best model.
-        if (
-            self.state.best_model_checkpoint is not None
-            and str(Path(self.state.best_model_checkpoint)) in checkpoints_sorted
-        ):
-            best_model_index = checkpoints_sorted.index(str(Path(self.state.best_model_checkpoint)))
-            for i in range(best_model_index, len(checkpoints_sorted) - 2):
-                checkpoints_sorted[i], checkpoints_sorted[i + 1] = checkpoints_sorted[i + 1], checkpoints_sorted[i]
-        return checkpoints_sorted
-
-    def _rotate_checkpoints(self, use_mtime=False, output_dir=None) -> None:
-        if self.args.save_total_limit is None or self.args.save_total_limit <= 0:
-            return
-
-        # Check if we should delete older checkpoint(s)
-        checkpoints_sorted = self._sorted_checkpoints(use_mtime=use_mtime, output_dir=output_dir)
-        if len(checkpoints_sorted) <= self.args.save_total_limit:
-            return
-
-        # If save_total_limit=1 with load_best_model_at_end=True, we could end up deleting the last checkpoint, which
-        # we don't do to allow resuming.
-        save_total_limit = self.args.save_total_limit
-        if (
-            self.state.best_model_checkpoint is not None
-            and self.args.save_total_limit == 1
-            and checkpoints_sorted[-1] != self.state.best_model_checkpoint
-        ):
-            save_total_limit = 2
-
-        number_of_checkpoints_to_delete = max(0, len(checkpoints_sorted) - save_total_limit)
-        checkpoints_to_be_deleted = checkpoints_sorted[:number_of_checkpoints_to_delete]
-        for checkpoint in checkpoints_to_be_deleted:
-            logger.info(f"Deleting older checkpoint [{checkpoint}] due to args.save_total_limit")
-            shutil.rmtree(checkpoint, ignore_errors=True)
 
     def evaluate(
         self,
