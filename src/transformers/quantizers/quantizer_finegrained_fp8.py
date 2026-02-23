@@ -157,6 +157,16 @@ class FineGrainedFP8HfQuantizer(HfQuantizer):
                     source_patterns=["weight$", "weight_scale_inv", "activation_scale"],
                     target_patterns="weight",
                     operations=[Fp8Dequantize(self)],
-                )
+                ),
+                WeightConverter(
+                    source_patterns=["mlp.experts.gate_up_proj$", "mlp.experts.gate_up_proj_scale_inv", "activation_scale"],
+                    target_patterns="mlp.experts.gate_up_proj",
+                    operations=[Fp8Dequantize(self)],
+                ),
+                WeightConverter(
+                    source_patterns=["mlp.experts.down_proj$", "mlp.experts.down_proj_scale_inv", "activation_scale"],
+                    target_patterns="mlp.experts.down_proj",
+                    operations=[Fp8Dequantize(self)],
+                ),
             ]
         return []

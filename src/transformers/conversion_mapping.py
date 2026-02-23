@@ -426,6 +426,9 @@ def get_model_conversion_mapping(
     model_type = getattr(model.config, "model_type", None)
     if model_type is not None:
         model_specific_conversions = get_checkpoint_conversion_mapping(model_type)
+        if hf_quantizer.quantization_config.dequantize and model_type=="qwen3_vl_moe":
+            model_specific_conversions = None
+            
         if model_specific_conversions is not None:
             weight_conversions.extend(model_specific_conversions)
 
